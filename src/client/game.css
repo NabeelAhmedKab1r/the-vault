@@ -1,0 +1,114 @@
+body {
+  margin: 0;
+  padding: 0;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #0f0f0f;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+#app {
+  width: 100%;
+  min-height: 100vh;
+}
+
+/* The Phaser canvas isn't used for real content until Phase 4 (crack-reveal
+   spectacle). Kept mounted so the scene chain stays wired up, just hidden. */
+#game-container {
+  display: none;
+}
+
+#ui-root {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+h2 {
+  font-size: 1em;
+  margin: 0 0 8px;
+}
+
+.hint {
+  font-size: 0.85em;
+  color: rgba(255, 255, 255, 0.6);
+  margin: 0 0 8px;
+}
+
+.error {
+  font-size: 0.85em;
+  color: #ff6b6b;
+  min-height: 1.2em;
+  margin: 4px 0;
+}
+
+#guess-form {
+  display: flex;
+  gap: 8px;
+}
+
+input[type='text'] {
+  font-family: monospace;
+  font-size: 1.1em;
+  letter-spacing: 0.1em;
+  padding: 6px 8px;
+  flex: 1;
+  background: #1c1c1c;
+  color: inherit;
+  border: 1px solid #444;
+  border-radius: 6px;
+}
+
+button {
+  font-size: 0.95em;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background-color: #d93900;
+  color: #ffffff;
+  cursor: pointer;
+}
+
+button:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+}
+
+#guess-result {
+  font-size: 0.95em;
+}
+
+ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+#board-list li,
+#scratch-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.9em;
+  padding: 6px 8px;
+  background: #1a1a1a;
+  border-radius: 6px;
+}
+
+#scratch-list li.inconsistent {
+  opacity: 0.5;
+}
+
+.guess-code {
+  font-family: monospace;
+  letter-spacing: 0.1em;
+}
+
+#scratch-summary {
+  font-size: 0.9em;
+}
