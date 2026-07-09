@@ -5,7 +5,8 @@ import {
   scoreGuess,
   validateGuessFormat,
 } from '../../shared/game';
-import type { BoardEntry, VaultPublicState, VaultStatus } from '../../shared/api';
+import type { ArchiveEntry, BoardEntry, VaultPublicState, VaultStatus } from '../../shared/api';
+import { computeAssists, computeClosest } from './rotation';
 
 type VaultRecord = {
   date: string;
@@ -37,11 +38,17 @@ export type SubmitGuessResult =
       error: string;
     };
 
-/** Today's date in UTC as YYYY-MM-DD. The vault always rotates at midnight UTC. */
-export const todayUTC = (): string => new Date().toISOString().slice(0, 10);
+/** YYYY-MM-DD in UTC, offset by `daysOffset` whole days from now. The vault always rotates at midnight UTC. */
+const dateUTCOffset = (daysOffset: number): string =>
+  new Date(Date.now() + daysOffset * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+export const todayUTC = (): string => dateUTCOffset(0);
 
 const vaultKey = (date: string): string => `vault:${date}`;
 const attemptsKey = (date: string): string => `attempts:${date}`;
+const archiveKey = (date: string): string => `archive:${date}`;
+const ARCHIVE_INDEX_KEY = 'archive:index';
+const dateToScore = (date: string): number => Number(date.replace(/-/g, ''));
 
 const parseVaultRecord = (date: string, hash: Record<string, string>): VaultRecord => {
   const record: VaultRecord = {
@@ -59,12 +66,16 @@ const parseVaultRecord = (date: string, hash: Record<string, string>): VaultReco
 /**
  * DEV-ONLY: wipes today's vault + attempts hash entirely, so a fresh
  * combination gets generated and the one-guess-per-day claim is cleared on
- * next access. Only ever called from the moderator-only, subreddit-gated
- * menu action in routes/menu.ts — never reachable from the game UI.
+ * next access. Also clears any archive entry for today, in case it was
+ * closed via the dev-only rotation trigger — otherwise a stale archive
+ * entry would sit next to a freshly-generated vault for the same date.
+ * Only ever called from the moderator-only, subreddit-gated menu action in
+ * routes/menu.ts — never reachable from the game UI.
  */
 export const resetTodayVault = async (): Promise<string> => {
   const date = todayUTC();
-  await redis.del(vaultKey(date), attemptsKey(date));
+  await redis.del(vaultKey(date), attemptsKey(date), archiveKey(date));
+  await redis.zRem(ARCHIVE_INDEX_KEY, [date]);
   return date;
 };
 
@@ -209,4 +220,78 @@ export const submitGuess = async (
     vault: toPublicVaultState(finalVault),
     board,
   };
+};
+
+export type RotationOutcome =
+  | { closed: true; alreadyArchived: boolean; date: string; archive: ArchiveEntry }
+  | { closed: false; date: string; reason: string };
+
+/**
+ * Closes out the vault for `date` and stores its archive record. Idempotent:
+ * if `date` was already archived, returns the existing entry instead of
+ * recomputing it (safe to call twice if a cron retry or a dev click fires
+ * more than once). Does not touch any other date's vault.
+ */
+const closeVaultAndArchive = async (date: string): Promise<RotationOutcome> => {
+  const existingRaw = await redis.get(archiveKey(date));
+  if (existingRaw) {
+    return { closed: true, alreadyArchived: true, date, archive: JSON.parse(existingRaw) as ArchiveEntry };
+  }
+
+  const hash = await redis.hGetAll(vaultKey(date));
+  if (!hash?.combination) {
+    return { closed: false, date, reason: `No vault found for ${date} — nothing to close.` };
+  }
+
+  const vault = parseVaultRecord(date, hash);
+  const board = await getBoard(date);
+
+  const archive: ArchiveEntry =
+    vault.status === 'cracked' && vault.crackedByUserId
+      ? {
+          date,
+          status: 'cracked',
+          combination: vault.combination,
+          winner: { userId: vault.crackedByUserId, username: vault.crackedByUsername ?? 'unknown' },
+          assists: computeAssists(board, vault.crackedByUserId),
+          totalGuesses: board.length,
+        }
+      : {
+          date,
+          status: 'unsolved',
+          combination: vault.combination,
+          closest: computeClosest(board),
+          totalGuesses: board.length,
+        };
+
+  await redis.set(archiveKey(date), JSON.stringify(archive));
+  await redis.zAdd(ARCHIVE_INDEX_KEY, { member: date, score: dateToScore(date) });
+
+  // "Closed" just means no longer accepting guesses. A cracked vault is
+  // already closed; an active one that ran out the clock becomes expired.
+  if (vault.status === 'active') {
+    await redis.hSet(vaultKey(date), { status: 'expired' });
+  }
+
+  return { closed: true, alreadyArchived: false, date, archive };
+};
+
+/** Production entry point: called by the midnight-UTC cron job to close out yesterday's vault. */
+export const runDailyRotation = async (): Promise<RotationOutcome> => closeVaultAndArchive(dateUTCOffset(-1));
+
+/**
+ * DEV-ONLY: closes out TODAY's vault immediately instead of waiting for a
+ * real day boundary, using the exact same close+archive mechanics as
+ * runDailyRotation. Only ever called from the moderator-only,
+ * subreddit-gated menu action in routes/menu.ts.
+ */
+export const devCloseTodayVault = async (): Promise<RotationOutcome> => closeVaultAndArchive(todayUTC());
+
+/** Fetches the most recently archived vaults, most recent first. */
+export const getRecentArchive = async (limit: number): Promise<ArchiveEntry[]> => {
+  const dates = await redis.zRange(ARCHIVE_INDEX_KEY, 0, limit - 1, { by: 'rank', reverse: true });
+  if (dates.length === 0) return [];
+
+  const raw = await redis.mGet(dates.map((d) => archiveKey(d.member)));
+  return raw.filter((value): value is string => Boolean(value)).map((value) => JSON.parse(value) as ArchiveEntry);
 };

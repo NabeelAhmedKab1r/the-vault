@@ -1,12 +1,21 @@
 import { Hono } from 'hono';
 import { context, reddit } from '@devvit/web/server';
-import { getBoard, getMyAttempt, getOrCreateTodayVault, submitGuess, toPublicVaultState } from '../core/vault';
-import type { BoardResponse, GuessRequest, GuessResponse, InitResponse } from '../../shared/api';
+import {
+  getBoard,
+  getMyAttempt,
+  getOrCreateTodayVault,
+  getRecentArchive,
+  submitGuess,
+  toPublicVaultState,
+} from '../core/vault';
+import type { ArchiveResponse, BoardResponse, GuessRequest, GuessResponse, InitResponse } from '../../shared/api';
 
 type ErrorResponse = {
   status: 'error';
   message: string;
 };
+
+const ARCHIVE_STRIP_LIMIT = 14;
 
 export const api = new Hono();
 
@@ -59,6 +68,17 @@ api.get('/board', async (c) => {
   } catch (error) {
     console.error('API Board Error:', error);
     const message = error instanceof Error ? error.message : 'Unknown error loading board';
+    return c.json<ErrorResponse>({ status: 'error', message }, 400);
+  }
+});
+
+api.get('/archive', async (c) => {
+  try {
+    const entries = await getRecentArchive(ARCHIVE_STRIP_LIMIT);
+    return c.json<ArchiveResponse>({ type: 'archive', entries });
+  } catch (error) {
+    console.error('API Archive Error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error loading archive';
     return c.json<ErrorResponse>({ status: 'error', message }, 400);
   }
 });

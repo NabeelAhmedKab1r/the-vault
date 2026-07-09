@@ -58,3 +58,32 @@ export type GuessResponse =
       status: 'error';
       error: string;
     };
+
+/** A single named score, used for both "assist" credits and "closest guess" entries. */
+export type ArchiveScoreEntry = {
+  userId: string;
+  username: string;
+  score: number;
+};
+
+export type ArchiveEntry =
+  | {
+      date: string;
+      status: 'cracked';
+      combination: string;
+      winner: { userId: string; username: string };
+      assists: ArchiveScoreEntry[];
+      totalGuesses: number;
+    }
+  | {
+      date: string;
+      status: 'unsolved';
+      combination: string;
+      closest: ArchiveScoreEntry[];
+      totalGuesses: number;
+    };
+
+export type ArchiveResponse = {
+  type: 'archive';
+  entries: ArchiveEntry[];
+};

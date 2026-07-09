@@ -1,6 +1,15 @@
 import { COMBINATION_LENGTH, validateGuessFormat } from '../shared/game';
 import { checkHypothesis } from '../shared/scratchpad';
-import type { BoardEntry, BoardResponse, GuessResponse, InitResponse, MyAttempt, VaultPublicState } from '../shared/api';
+import type {
+  ArchiveEntry,
+  ArchiveResponse,
+  BoardEntry,
+  BoardResponse,
+  GuessResponse,
+  InitResponse,
+  MyAttempt,
+  VaultPublicState,
+} from '../shared/api';
 
 type UIState = {
   username: string;
@@ -42,12 +51,15 @@ export const initVaultUI = (): void => {
   const guessResultEl = document.getElementById('guess-result') as HTMLParagraphElement;
   const boardListEl = document.getElementById('board-list') as HTMLUListElement;
   const boardEmptyEl = document.getElementById('board-empty') as HTMLParagraphElement;
+  const archiveStripEl = document.getElementById('archive-strip') as HTMLUListElement;
+  const archiveEmptyEl = document.getElementById('archive-empty') as HTMLParagraphElement;
   const scratchInput = document.getElementById('scratch-input') as HTMLInputElement;
   const scratchErrorEl = document.getElementById('scratch-error') as HTMLParagraphElement;
   const scratchSummaryEl = document.getElementById('scratch-summary') as HTMLParagraphElement;
   const scratchListEl = document.getElementById('scratch-list') as HTMLUListElement;
 
   let state: UIState | null = null;
+  let archiveEntries: ArchiveEntry[] = [];
   let submitting = false;
 
   const renderHeader = (): void => {
@@ -135,6 +147,31 @@ export const initVaultUI = (): void => {
     );
   };
 
+  const renderArchive = (): void => {
+    archiveEmptyEl.style.display = archiveEntries.length === 0 ? '' : 'none';
+    archiveStripEl.replaceChildren(
+      ...archiveEntries.map((entry) => {
+        const li = document.createElement('li');
+
+        const dateEl = document.createElement('span');
+        dateEl.className = 'archive-date';
+        dateEl.textContent = entry.date.slice(5); // MM-DD is enough in a compact strip
+
+        const resultEl = document.createElement('span');
+        if (entry.status === 'cracked') {
+          resultEl.textContent = `🔓 ${entry.winner.username}`;
+        } else {
+          const bestScore = entry.closest[0]?.score;
+          resultEl.textContent =
+            bestScore === undefined ? 'no guesses' : `closest ${bestScore}/${COMBINATION_LENGTH}`;
+        }
+
+        li.append(dateEl, resultEl);
+        return li;
+      })
+    );
+  };
+
   const render = (): void => {
     renderHeader();
     renderGuessSection();
@@ -201,6 +238,18 @@ export const initVaultUI = (): void => {
     }
   };
 
+  const loadArchive = async (): Promise<void> => {
+    try {
+      const res = await fetch('/api/archive');
+      if (!res.ok) return;
+      const data = (await res.json()) as ArchiveResponse;
+      archiveEntries = data.entries;
+      renderArchive();
+    } catch {
+      // Non-critical — the archive strip just stays empty until next load.
+    }
+  };
+
   const pollBoard = async (): Promise<void> => {
     if (!state) return;
     try {
@@ -231,5 +280,6 @@ export const initVaultUI = (): void => {
   });
 
   void loadInit();
+  void loadArchive();
   setInterval(() => void pollBoard(), POLL_INTERVAL_MS);
 };
