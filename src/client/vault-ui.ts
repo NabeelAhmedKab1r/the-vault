@@ -1,5 +1,6 @@
 import { COMBINATION_LENGTH, validateGuessFormat } from '../shared/game';
 import { checkHypothesis } from '../shared/scratchpad';
+import { showCrackReveal, showLockedReveal } from './reveal-controller';
 import type {
   ArchiveEntry,
   ArchiveResponse,
@@ -29,6 +30,28 @@ const formatRelativeTime = (ts: number): string => {
   const diffHour = Math.floor(diffMin / 60);
   if (diffHour < 24) return `${diffHour}h ago`;
   return `${Math.floor(diffHour / 24)}d ago`;
+};
+
+// Tracks the most recent "unsolved vault" reveal this browser has already
+// shown, so it plays once per closed vault instead of on every page load.
+// Keyed by date+combination (not just date) so the dev reset/rotate loop —
+// same date, new combination each time — replays it correctly during testing.
+const LOCKED_REVEAL_SEEN_KEY = 'vault-locked-reveal-seen';
+
+const hasSeenLockedReveal = (revealId: string): boolean => {
+  try {
+    return localStorage.getItem(LOCKED_REVEAL_SEEN_KEY) === revealId;
+  } catch {
+    return true; // storage unavailable — don't replay every load
+  }
+};
+
+const markLockedRevealSeen = (revealId: string): void => {
+  try {
+    localStorage.setItem(LOCKED_REVEAL_SEEN_KEY, revealId);
+  } catch {
+    // best-effort only
+  }
 };
 
 const userGuessRow = (username: string, guess: string): HTMLSpanElement => {
@@ -214,6 +237,10 @@ export const initVaultUI = (): void => {
       }
       submitting = false;
       render();
+
+      if (data.cracked && state) {
+        showCrackReveal({ username: state.username, combination: raw });
+      }
     } catch (error) {
       guessErrorEl.textContent = `Failed to submit guess: ${String(error)}`;
       guessSubmitBtn.disabled = false;
@@ -245,6 +272,19 @@ export const initVaultUI = (): void => {
       const data = (await res.json()) as ArchiveResponse;
       archiveEntries = data.entries;
       renderArchive();
+
+      // The most recently closed vault is always entries[0] (reverse-chronological).
+      // If it went unsolved and this browser hasn't seen that reveal yet, show it now —
+      // this is how the "vault stays locked" moment reaches a real visitor arriving
+      // after rotation, since by then today's vault field already points at a fresh day.
+      const mostRecent = archiveEntries[0];
+      if (mostRecent && mostRecent.status === 'unsolved') {
+        const revealId = `${mostRecent.date}:${mostRecent.combination}`;
+        if (!hasSeenLockedReveal(revealId)) {
+          markLockedRevealSeen(revealId);
+          showLockedReveal({ combination: mostRecent.combination, closest: mostRecent.closest });
+        }
+      }
     } catch {
       // Non-critical — the archive strip just stays empty until next load.
     }

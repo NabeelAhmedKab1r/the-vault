@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { UiResponse } from '@devvit/web/shared';
 import { context } from '@devvit/web/server';
 import { createPost } from '../core/post';
-import { devCloseTodayVault, resetTodayVault } from '../core/vault';
+import { devCloseTodayVault, getOrCreateTodayVault, resetTodayVault } from '../core/vault';
 
 export const menu = new Hono();
 
@@ -87,5 +87,29 @@ menu.post('/dev-rotate-now', async (c) => {
   } catch (error) {
     console.error(`Error running dev rotation: ${error}`);
     return c.json<UiResponse>({ showToast: 'Failed to run rotation' }, 400);
+  }
+});
+
+// Lets you feed yourself the winning guess to test the crack-reveal path
+// live, instead of brute-forcing 5 unique digits. Logged too, in case the
+// toast gets missed.
+menu.post('/dev-reveal-combination', async (c) => {
+  if (!isDevSubreddit()) {
+    return c.json<UiResponse>(
+      { showToast: 'Combination reveal is disabled outside the dev test subreddit.' },
+      403
+    );
+  }
+
+  try {
+    const vault = await getOrCreateTodayVault();
+    console.log(`[DEV] Today's (${vault.date}) combination: ${vault.combination}`);
+    return c.json<UiResponse>(
+      { showToast: `Today's combination is ${vault.combination} (also logged).` },
+      200
+    );
+  } catch (error) {
+    console.error(`Error revealing combination: ${error}`);
+    return c.json<UiResponse>({ showToast: 'Failed to reveal combination' }, 400);
   }
 });

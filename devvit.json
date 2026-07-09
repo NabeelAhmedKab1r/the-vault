@@ -45,6 +45,13 @@
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/dev-rotate-now"
+      },
+      {
+        "label": "[DEV ONLY] Reveal current combination",
+        "description": "Toasts + logs today's real combination so the crack-reveal path can be tested live. Only works on the dev test subreddit — remove before a real launch.",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/dev-reveal-combination"
       }
     ]
   },

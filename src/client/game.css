@@ -11,10 +11,26 @@ body {
   min-height: 100vh;
 }
 
-/* The Phaser canvas isn't used for real content until Phase 4 (crack-reveal
-   spectacle). Kept mounted so the scene chain stays wired up, just hidden. */
+/* Phaser is reserved for two moments: the vault-crack reveal and the
+   still-locked reveal (see reveal-controller.ts). This stays a real,
+   full-viewport-sized box at all times (not display:none) so Phaser's
+   RESIZE scale mode always measures a correct, non-zero parent — toggling
+   display instead of visibility would leave the canvas permanently sized
+   to its 1024x768 config fallback, since going from display:none to block
+   never fires a resize event for Phaser to pick up. Invisible + inert
+   until `.visible` is added. */
 #game-container {
-  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+#game-container.visible {
+  visibility: visible;
+  pointer-events: auto;
 }
 
 #ui-root {
