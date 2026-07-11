@@ -1,5 +1,5 @@
 // Shared color palette carried over from the original vault-cracking theme
-// (heist/steel/gold) so "The Vault — Getaway" still reads as the same
+// (heist/steel/gold) so "The Vault: Getaway" still reads as the same
 // product after the gameplay pivot. Numeric hex for Phaser fill colors,
 // string hex for Phaser Text styles / CSS.
 

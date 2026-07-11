@@ -1,28 +1,21 @@
 import { Hono } from 'hono';
 import { context, reddit } from '@devvit/web/server';
-import {
-  getBoard,
-  getMyAttempt,
-  getOrCreateTodayVault,
-  getRecentArchive,
-  submitGuess,
-  todayUTC,
-  toPublicVaultState,
-} from '../core/vault';
+import { todayUTC } from '../core/dateUTC';
 import { completeQuest, getQuestStatus, QUEST_TARGET } from '../core/quest';
-import { addCoins, equipSkin, getPlayerProfile, unlockSkin } from '../core/player';
+import { addCoins, equipScenery, equipSkin, getPlayerProfile, unlockScenery, unlockSkin } from '../core/player';
 import { getLeaderboard, submitScore } from '../core/leaderboard';
-import { COIN_DISTANCE_DIVISOR, DEFAULT_SKIN_ID } from '../../shared/economy';
+import { getGhostReplay, sanitizeGhostInputs, saveGhostReplay } from '../core/ghost';
+import { getDeathCounts, recordDeath, sanitizeObstacleIndex } from '../core/deathMarkers';
+import { COIN_DISTANCE_DIVISOR, DEFAULT_SCENERY_ID, DEFAULT_SKIN_ID } from '../../shared/economy';
 import type {
-  ArchiveResponse,
-  BoardResponse,
-  GuessRequest,
-  GuessResponse,
-  InitResponse,
+  DeathMarkersResponse,
+  GhostResponse,
   LeaderboardResponse,
   PlayerResponse,
   QuestResponse,
   RunCompleteRequest,
+  SceneryActionRequest,
+  SceneryActionResponse,
   SkinActionRequest,
   SkinActionResponse,
 } from '../../shared/api';
@@ -32,73 +25,7 @@ type ErrorResponse = {
   message: string;
 };
 
-const ARCHIVE_STRIP_LIMIT = 14;
-
 export const api = new Hono();
-
-api.get('/init', async (c) => {
-  const { postId, userId } = context;
-
-  if (!postId) {
-    console.error('API Init Error: postId not found in devvit context');
-    return c.json<ErrorResponse>(
-      { status: 'error', message: 'postId is required but missing from context' },
-      400
-    );
-  }
-
-  try {
-    const [vault, username] = await Promise.all([
-      getOrCreateTodayVault(),
-      reddit.getCurrentUsername(),
-    ]);
-    const [board, myAttempt] = await Promise.all([
-      getBoard(vault.date),
-      userId ? getMyAttempt(vault.date, userId) : Promise.resolve(null),
-    ]);
-
-    const response: InitResponse = {
-      type: 'init',
-      postId,
-      username: username ?? 'anonymous',
-      vault: toPublicVaultState(vault),
-      board,
-      myAttempt,
-    };
-    if (userId) response.userId = userId;
-
-    return c.json<InitResponse>(response);
-  } catch (error) {
-    console.error(`API Init Error for post ${postId}:`, error);
-    const message = error instanceof Error ? error.message : 'Unknown error during initialization';
-    return c.json<ErrorResponse>({ status: 'error', message }, 400);
-  }
-});
-
-// Lightweight poll target for the shared board — no per-user attempt lookup,
-// so it stays cheap to call on an interval.
-api.get('/board', async (c) => {
-  try {
-    const vault = await getOrCreateTodayVault();
-    const board = await getBoard(vault.date);
-    return c.json<BoardResponse>({ type: 'board', vault: toPublicVaultState(vault), board });
-  } catch (error) {
-    console.error('API Board Error:', error);
-    const message = error instanceof Error ? error.message : 'Unknown error loading board';
-    return c.json<ErrorResponse>({ status: 'error', message }, 400);
-  }
-});
-
-api.get('/archive', async (c) => {
-  try {
-    const entries = await getRecentArchive(ARCHIVE_STRIP_LIMIT);
-    return c.json<ArchiveResponse>({ type: 'archive', entries });
-  } catch (error) {
-    console.error('API Archive Error:', error);
-    const message = error instanceof Error ? error.message : 'Unknown error loading archive';
-    return c.json<ErrorResponse>({ status: 'error', message }, 400);
-  }
-});
 
 api.get('/quest', async (c) => {
   const { userId } = context;
@@ -139,7 +66,13 @@ api.post('/quest/complete', async (c) => {
 
 const anonymousProfile = (): PlayerResponse => ({
   type: 'player',
-  profile: { coins: 0, unlockedSkins: [DEFAULT_SKIN_ID], equippedSkin: DEFAULT_SKIN_ID },
+  profile: {
+    coins: 0,
+    unlockedSkins: [DEFAULT_SKIN_ID],
+    equippedSkin: DEFAULT_SKIN_ID,
+    unlockedScenery: [DEFAULT_SCENERY_ID],
+    equippedScenery: DEFAULT_SCENERY_ID,
+  },
 });
 
 api.get('/player', async (c) => {
@@ -177,11 +110,47 @@ api.post('/run-complete', async (c) => {
   try {
     const username = (await reddit.getCurrentUsername()) ?? 'anonymous';
     const coinsEarned = Math.floor(distance / COIN_DISTANCE_DIVISOR);
-    const [profile] = await Promise.all([addCoins(userId, coinsEarned), submitScore(userId, username, distance)]);
+    const [profile, scoreResult] = await Promise.all([
+      addCoins(userId, coinsEarned),
+      submitScore(userId, username, distance),
+    ]);
+    const followUps: Promise<unknown>[] = [];
+    if (scoreResult.becameNumberOne) {
+      const inputs = sanitizeGhostInputs(body?.inputs);
+      followUps.push(saveGhostReplay({ userId, username, score: distance, inputs }));
+    }
+    const deathObstacleIndex = sanitizeObstacleIndex(body?.deathObstacleIndex);
+    if (deathObstacleIndex !== null) {
+      followUps.push(recordDeath(deathObstacleIndex));
+    }
+    if (followUps.length > 0) await Promise.all(followUps);
+
     return c.json<PlayerResponse>({ type: 'player', profile });
   } catch (error) {
     console.error(`API Run Complete Error for user ${userId}:`, error);
     const message = error instanceof Error ? error.message : 'Unknown error crediting coins';
+    return c.json<ErrorResponse>({ status: 'error', message }, 400);
+  }
+});
+
+api.get('/ghost', async (c) => {
+  try {
+    const replay = await getGhostReplay();
+    return c.json<GhostResponse>({ type: 'ghost', replay });
+  } catch (error) {
+    console.error('API Ghost Error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error loading ghost replay';
+    return c.json<ErrorResponse>({ status: 'error', message }, 400);
+  }
+});
+
+api.get('/death-markers', async (c) => {
+  try {
+    const counts = await getDeathCounts();
+    return c.json<DeathMarkersResponse>({ type: 'deathMarkers', counts });
+  } catch (error) {
+    console.error('API Death Markers Error:', error);
+    const message = error instanceof Error ? error.message : 'Unknown error loading death markers';
     return c.json<ErrorResponse>({ status: 'error', message }, 400);
   }
 });
@@ -248,28 +217,50 @@ api.post('/skins/equip', async (c) => {
   }
 });
 
-api.post('/guess', async (c) => {
+api.post('/scenery/unlock', async (c) => {
   const { userId } = context;
-
   if (!userId) {
-    return c.json<GuessResponse>(
-      { type: 'guess', status: 'error', error: 'You must be logged in to submit a guess.' },
-      401
-    );
+    return c.json<ErrorResponse>({ status: 'error', message: 'You must be logged in to unlock scenery.' }, 401);
   }
 
-  const body = await c.req.json<GuessRequest>().catch(() => null);
-  if (!body || typeof body.guess !== 'string') {
-    return c.json<GuessResponse>({ type: 'guess', status: 'error', error: 'Missing guess.' }, 400);
+  const body = await c.req.json<SceneryActionRequest>().catch(() => null);
+  if (!body || typeof body.sceneryId !== 'string') {
+    return c.json<ErrorResponse>({ status: 'error', message: 'Missing sceneryId.' }, 400);
   }
 
   try {
-    const username = (await reddit.getCurrentUsername()) ?? 'anonymous';
-    const result = await submitGuess(userId, username, body.guess);
-    return c.json<GuessResponse>({ type: 'guess', ...result }, result.status === 'error' ? 400 : 200);
+    const result = await unlockScenery(userId, body.sceneryId);
+    const response: SceneryActionResponse = result.error
+      ? { type: 'scenery', status: 'error', error: result.error, profile: result.profile }
+      : { type: 'scenery', status: 'ok', profile: result.profile };
+    return c.json<SceneryActionResponse>(response, result.error ? 400 : 200);
   } catch (error) {
-    console.error(`API Guess Error for user ${userId}:`, error);
-    const message = error instanceof Error ? error.message : 'Unknown error submitting guess';
-    return c.json<GuessResponse>({ type: 'guess', status: 'error', error: message }, 400);
+    console.error(`API Scenery Unlock Error for user ${userId}:`, error);
+    const message = error instanceof Error ? error.message : 'Unknown error unlocking scenery';
+    return c.json<ErrorResponse>({ status: 'error', message }, 400);
+  }
+});
+
+api.post('/scenery/equip', async (c) => {
+  const { userId } = context;
+  if (!userId) {
+    return c.json<ErrorResponse>({ status: 'error', message: 'You must be logged in to equip scenery.' }, 401);
+  }
+
+  const body = await c.req.json<SceneryActionRequest>().catch(() => null);
+  if (!body || typeof body.sceneryId !== 'string') {
+    return c.json<ErrorResponse>({ status: 'error', message: 'Missing sceneryId.' }, 400);
+  }
+
+  try {
+    const result = await equipScenery(userId, body.sceneryId);
+    const response: SceneryActionResponse = result.error
+      ? { type: 'scenery', status: 'error', error: result.error, profile: result.profile }
+      : { type: 'scenery', status: 'ok', profile: result.profile };
+    return c.json<SceneryActionResponse>(response, result.error ? 400 : 200);
+  } catch (error) {
+    console.error(`API Scenery Equip Error for user ${userId}:`, error);
+    const message = error instanceof Error ? error.message : 'Unknown error equipping scenery';
+    return c.json<ErrorResponse>({ status: 'error', message }, 400);
   }
 });

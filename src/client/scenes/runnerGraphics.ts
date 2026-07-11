@@ -7,7 +7,7 @@
 
 import { Scene, GameObjects } from 'phaser';
 import { THEME_COLORS } from '../theme';
-import type { SkinPalette } from '../../shared/economy';
+import type { SceneryPalette, SkinPalette } from '../../shared/economy';
 
 const SPARK_KEY = 'runner-spark';
 
@@ -157,25 +157,65 @@ export const ensureObstacleTextures = (scene: Scene): string[] => {
   return OBSTACLE_KEYS;
 };
 
+// --- Community death marker: a small "danger tag" badge overlaid on
+// obstacles that have claimed several deaths today (see Runner.ts's
+// DEATH_MARKER_THRESHOLD) — purely a read-only ambient hint, same
+// draw-shapes-then-generateTexture approach as everything else here, at a
+// small fixed size independent of the obstacle art it sits on top of.
+export const DEATH_MARKER_SIZE = 18;
+const DEATH_MARKER_KEY = 'runner-death-marker';
+
+export const ensureDeathMarkerTexture = (scene: Scene): string => {
+  if (!scene.textures.exists(DEATH_MARKER_KEY)) {
+    const g = scene.make.graphics({}, false);
+    const s = DEATH_MARKER_SIZE;
+    // Dark smudge backing so the mark reads clearly against any obstacle's
+    // palette, then a red scratch-mark "X" on top.
+    g.fillStyle(0x000000, 0.4);
+    g.fillCircle(s / 2, s / 2, s / 2);
+    g.lineStyle(3, THEME_COLORS.danger, 1);
+    const pad = 4;
+    g.lineBetween(pad, pad, s - pad, s - pad);
+    g.lineBetween(s - pad, pad, pad, s - pad);
+    g.generateTexture(DEATH_MARKER_KEY, s, s);
+    g.destroy();
+  }
+  return DEATH_MARKER_KEY;
+};
+
 // --- Parallax background tiles. Each layer's texture is generated at
 // EXACTLY the pixel height it will be displayed at (no runtime cropping/
 // offset math needed) with its content anchored to the tile's bottom edge,
 // so positioning a TileSprite with origin (0,1) at the ground line lines
 // everything up automatically. Horizontal scroll is done by the caller via
 // tilePositionX — the tile just needs to repeat cleanly left-to-right.
+//
+// Scenery (Stage 2C follow-up) reuses this exact same shape layout per
+// palette — one full tile set generated per scenery id, keyed by id, so
+// equipping a scenery is just swapping which pre-baked texture keys the
+// TileSprites point at (see Runner.ts's setEquippedScenery), no new
+// rendering system.
 export const SKYLINE_TILE = { w: 320, h: 220 };
 export const MIDGROUND_TILE = { w: 220, h: 130 };
 export const GROUND_TILE = { w: 120, h: 22 };
 
-const SKYLINE_KEY = 'runner-bg-skyline';
-const MIDGROUND_KEY = 'runner-bg-mid';
-const GROUND_KEY = 'runner-bg-ground';
+const skylineKeyFor = (sceneryId: string): string => `runner-bg-skyline-${sceneryId}`;
+const midgroundKeyFor = (sceneryId: string): string => `runner-bg-mid-${sceneryId}`;
+const groundKeyFor = (sceneryId: string): string => `runner-bg-ground-${sceneryId}`;
 
-export const ensureBackgroundTextures = (scene: Scene): { skyline: string; midground: string; ground: string } => {
-  if (!scene.textures.exists(SKYLINE_KEY)) {
+export const ensureBackgroundTexturesForScenery = (
+  scene: Scene,
+  sceneryId: string,
+  palette: SceneryPalette
+): { skyline: string; midground: string; ground: string } => {
+  const skylineKey = skylineKeyFor(sceneryId);
+  const midgroundKey = midgroundKeyFor(sceneryId);
+  const groundKey = groundKeyFor(sceneryId);
+
+  if (!scene.textures.exists(skylineKey)) {
     const g = scene.make.graphics({}, false);
     const { w, h } = SKYLINE_TILE;
-    g.fillStyle(0x171512, 1);
+    g.fillStyle(palette.skylineBase, 1);
     const buildings = [
       { x: 0, w: 60, h: 130 },
       { x: 60, w: 40, h: 90 },
@@ -184,20 +224,20 @@ export const ensureBackgroundTextures = (scene: Scene): { skyline: string; midgr
       { x: 250, w: 55, h: 150 },
     ];
     buildings.forEach((b) => g.fillRect(b.x, h - b.h, b.w, b.h));
-    g.fillStyle(THEME_COLORS.gold, 0.3);
+    g.fillStyle(palette.skylineWindow, 0.3);
     for (let i = 0; i < 16; i++) {
       const bx = 8 + ((i * 41) % (w - 16));
       const by = h - 15 - ((i * 29) % 100);
       g.fillRect(bx, by, 3, 4);
     }
-    g.generateTexture(SKYLINE_KEY, w, h);
+    g.generateTexture(skylineKey, w, h);
     g.destroy();
   }
 
-  if (!scene.textures.exists(MIDGROUND_KEY)) {
+  if (!scene.textures.exists(midgroundKey)) {
     const g = scene.make.graphics({}, false);
     const { w, h } = MIDGROUND_TILE;
-    g.fillStyle(0x232120, 1);
+    g.fillStyle(palette.midgroundBase, 1);
     const shapes = [
       { x: 10, w: 40, h: 70 },
       { x: 70, w: 55, h: 50 },
@@ -205,24 +245,60 @@ export const ensureBackgroundTextures = (scene: Scene): { skyline: string; midgr
       { x: 180, w: 35, h: 60 },
     ];
     shapes.forEach((s) => g.fillRect(s.x, h - s.h, s.w, s.h));
-    g.generateTexture(MIDGROUND_KEY, w, h);
+    g.generateTexture(midgroundKey, w, h);
     g.destroy();
   }
 
-  if (!scene.textures.exists(GROUND_KEY)) {
+  if (!scene.textures.exists(groundKey)) {
     const g = scene.make.graphics({}, false);
     const { w, h } = GROUND_TILE;
-    g.fillStyle(THEME_COLORS.steelDark, 1);
+    g.fillStyle(palette.groundBase, 1);
     g.fillRect(0, 0, w, h);
-    g.fillStyle(THEME_COLORS.steel, 1);
+    g.fillStyle(palette.groundAccent, 1);
     g.fillRect(0, 0, w, 3);
-    g.lineStyle(1, 0x1c1e22, 1);
+    g.lineStyle(1, palette.groundLine, 1);
     for (let x = 0; x < w; x += 30) {
       g.lineBetween(x, 4, x, h);
     }
-    g.generateTexture(GROUND_KEY, w, h);
+    if (palette.glisten) {
+      // Cheap stand-in for "wet reflective glint" — a few small bright
+      // dots, not a new lighting/shader system.
+      g.fillStyle(0xdff6ff, 0.7);
+      g.fillCircle(18, 13, 1.4);
+      g.fillCircle(52, 8, 1.1);
+      g.fillCircle(88, 16, 1.4);
+      g.fillCircle(105, 9, 1);
+    }
+    g.generateTexture(groundKey, w, h);
     g.destroy();
   }
 
-  return { skyline: SKYLINE_KEY, midground: MIDGROUND_KEY, ground: GROUND_KEY };
+  return { skyline: skylineKey, midground: midgroundKey, ground: groundKey };
+};
+
+// --- Scenery shop swatch preview: a small "mini skyline" thumbnail per
+// scenery palette, reusing the same fill-shapes-then-generateTexture
+// approach as everything else above, just at a much smaller scale (the
+// full-size building layout doesn't scale down cleanly to swatch size).
+export const SCENERY_PREVIEW_SIZE = 40;
+
+export const ensureSceneryPreviewTexture = (scene: Scene, sceneryId: string, palette: SceneryPalette): string => {
+  const key = `runner-scenery-preview-${sceneryId}`;
+  if (!scene.textures.exists(key)) {
+    const g = scene.make.graphics({}, false);
+    const s = SCENERY_PREVIEW_SIZE;
+    g.fillStyle(palette.skylineBase, 1);
+    g.fillRect(0, 0, s, s * 0.65);
+    g.fillStyle(palette.skylineWindow, 0.85);
+    g.fillRect(s * 0.18, s * 0.18, 3, 3);
+    g.fillRect(s * 0.48, s * 0.32, 3, 3);
+    g.fillRect(s * 0.72, s * 0.14, 3, 3);
+    g.fillStyle(palette.groundBase, 1);
+    g.fillRect(0, s * 0.65, s, s * 0.35);
+    g.fillStyle(palette.groundAccent, 1);
+    g.fillRect(0, s * 0.65, s, 2);
+    g.generateTexture(key, s, s);
+    g.destroy();
+  }
+  return key;
 };

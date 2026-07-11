@@ -13,5 +13,5 @@ docsLink.addEventListener('click', () => {
 });
 
 if (context.username) {
-  titleElement.textContent = `The Vault — Getaway — welcome back, ${context.username}`;
+  titleElement.textContent = `The Vault: Getaway — welcome back, ${context.username}`;
 }

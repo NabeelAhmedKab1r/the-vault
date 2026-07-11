@@ -1,12 +1,11 @@
 // Today's leaderboard: each user's BEST score for TODAY's UTC date. Uses a
-// Redis sorted set for efficient ranking — the same zAdd/zRange primitives
-// vault.ts already uses for its archive index — plus a small companion
-// hash for usernames, since a sorted set member can't carry extra
-// metadata. Same lazy date-keyed pattern as quest.ts: a new day is just a
-// new, empty key, no rotation/cron job needed to "reset" it.
+// Redis sorted set for efficient ranking, plus a small companion hash for
+// usernames, since a sorted set member can't carry extra metadata. Same
+// lazy date-keyed pattern as quest.ts: a new day is just a new, empty key,
+// no rotation/cron job needed to "reset" it.
 
 import { redis } from '@devvit/web/server';
-import { todayUTC } from './vault';
+import { todayUTC } from './dateUTC';
 
 export type LeaderboardEntry = {
   userId: string;
@@ -22,18 +21,45 @@ export type LeaderboardResult = {
 const scoresKey = (date: string): string => `leaderboard:${date}`;
 const namesKey = (date: string): string => `leaderboard:${date}:names`;
 
+export type SubmitScoreResult = {
+  /** True if, after this submission, this user is today's #1 — regardless of whether THIS particular submission was the one that got them there (matches "if the live player takes the #1 spot themselves... this should just naturally fall out" from the ghost-racer spec). */
+  becameNumberOne: boolean;
+};
+
 /**
  * Records `score` as this user's result for today, but only keeps it if
  * it's a new best — a worse run should never overwrite a better one from
  * earlier today. Username is only refreshed alongside an improving score
  * (cheap to skip otherwise; a stale display name for one day is harmless).
+ * The scoring/persistence behavior here is unchanged from before — the
+ * only addition is the returned becameNumberOne flag, purely so the ghost
+ * racer feature knows when to (re)save the replay, and re-derived from the
+ * SAME sorted set rather than any separate bookkeeping.
  */
-export const submitScore = async (userId: string, username: string, score: number): Promise<void> => {
+export const submitScore = async (userId: string, username: string, score: number): Promise<SubmitScoreResult> => {
   const date = todayUTC();
-  const current = await redis.zScore(scoresKey(date), userId);
-  if (current !== undefined && current >= score) return;
-  await redis.zAdd(scoresKey(date), { member: userId, score });
-  await redis.hSet(namesKey(date), { [userId]: username });
+  const key = scoresKey(date);
+  const current = await redis.zScore(key, userId);
+  if (current === undefined || score > current) {
+    await redis.zAdd(key, { member: userId, score });
+    await redis.hSet(namesKey(date), { [userId]: username });
+  }
+
+  const top = await redis.zRange(key, 0, 0, { by: 'rank', reverse: true });
+  const becameNumberOne = top.length > 0 && top[0]!.member === userId;
+  return { becameNumberOne };
+};
+
+/**
+ * Removes this user's own entry from today's leaderboard — dev-only, so a
+ * tester can re-earn a clean #1 across repeated runs instead of being stuck
+ * behind their own earlier best. Only ever touches the calling user's own
+ * member in the sorted set/name hash, never anyone else's.
+ */
+export const removeMyScore = async (userId: string): Promise<void> => {
+  const date = todayUTC();
+  await redis.zRem(scoresKey(date), [userId]);
+  await redis.hDel(namesKey(date), [userId]);
 };
 
 export const getLeaderboard = async (userId: string | undefined, limit: number): Promise<LeaderboardResult> => {

@@ -4,7 +4,7 @@ import { Boot } from './scenes/Boot';
 import { Preloader } from './scenes/Preloader';
 import { Runner } from './scenes/Runner';
 
-// "The Vault — Getaway" is now a single fullscreen canvas game (no more
+// "The Vault: Getaway" is now a single fullscreen canvas game (no more
 // embedded-dial-plus-DOM-chrome split from the old vault-cracking build) —
 // see the project pivot notes for why. Arcade Physics powers the runner's
 // gravity/collision.

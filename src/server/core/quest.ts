@@ -1,15 +1,12 @@
 // Daily quest completion tracking. Follows the same lazy, UTC-date-keyed
-// Redis pattern as vault.ts's getOrCreateTodayVault — a new day's
+// Redis pattern as leaderboard.ts/ghost.ts/deathMarkers.ts — a new day's
 // completion set exists as soon as anyone reads or writes it, so "resets at
-// midnight UTC" falls out of the date-scoped key automatically, the same
-// way the vault itself resets without needing an explicit rotation step.
-// (The vault's cron-triggered rotation is for ARCHIVING the outgoing day's
-// result — the quest has no result worth archiving, so no cron involvement
-// needed here.)
+// midnight UTC" falls out of the date-scoped key automatically, no
+// rotation/cron job needed to reset anything.
 
 import { redis } from '@devvit/web/server';
 import type { QuestStatus } from '../../shared/api';
-import { todayUTC } from './vault';
+import { todayUTC } from './dateUTC';
 
 /** Obstacles to clear in a single run to complete today's quest. Fixed for now — the date-scoped key is what makes completion reset daily, not the target itself. */
 export const QUEST_TARGET = 12;

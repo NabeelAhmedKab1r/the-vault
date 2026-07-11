@@ -1,25 +1,35 @@
 import { Scene, GameObjects } from 'phaser';
 import type * as Phaser from 'phaser';
 import { THEME_COLORS, THEME_TEXT_COLORS } from '../theme';
+import { DEATH_MARKER_THRESHOLD } from '../../shared/api';
 import type {
+  DeathMarkersResponse,
+  GhostInputEvent,
+  GhostReplay,
+  GhostResponse,
   LeaderboardResponse,
   PlayerProfile,
   PlayerResponse,
   QuestResponse,
+  SceneryActionResponse,
   SkinActionResponse,
 } from '../../shared/api';
-import { DEFAULT_SKIN_ID, SKINS, type SkinDef } from '../../shared/economy';
+import { DEFAULT_SCENERY_ID, DEFAULT_SKIN_ID, SCENERY, SKINS, type SceneryDef, type SkinDef } from '../../shared/economy';
 import { rngFromString } from '../../shared/seededRandom';
 import {
-  ensureBackgroundTextures,
+  DEATH_MARKER_SIZE,
+  ensureBackgroundTexturesForScenery,
+  ensureDeathMarkerTexture,
   ensureObstacleTextures,
   ensurePlayerTexturesForSkin,
+  ensureSceneryPreviewTexture,
   ensureSparkTexture,
   GROUND_TILE,
   MIDGROUND_TILE,
   OBSTACLE_BASE,
   PLAYER_BASE_H,
   PLAYER_BASE_W,
+  SCENERY_PREVIEW_SIZE,
   SKYLINE_TILE,
 } from './runnerGraphics';
 
@@ -29,14 +39,18 @@ type Rect = { x: number; y: number; w: number; h: number };
 const pointInRect = (r: Rect, x: number, y: number): boolean =>
   x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
 
-type ShopSwatch = {
-  skin: SkinDef;
+type ShopTab = 'skins' | 'scenery';
+
+type ShopSwatchVisuals = {
   bg: GameObjects.Graphics;
   icon: GameObjects.Image;
   lockIcon: GameObjects.Text;
   label: GameObjects.Text;
   rect: Rect;
 };
+
+type ShopSwatch = ShopSwatchVisuals & { skin: SkinDef };
+type ShopScenerySwatch = ShopSwatchVisuals & { scenery: SceneryDef };
 
 /** Reference width the tuning constants below were picked at — actual sizes/speeds scale from this per the established doorScaleFor-style pattern. */
 const REFERENCE_WIDTH = 400;
@@ -55,12 +69,19 @@ const PLAYER_BODY_OFFSET_X = (PLAYER_BASE_W - PLAYER_BODY_W) / 2;
 const PLAYER_BODY_OFFSET_Y = PLAYER_BASE_H - PLAYER_BODY_H;
 
 const RUN_ANIM_KEY = 'thief-run';
+// Ghost always renders with DEFAULT_SKIN_ID's textures regardless of the
+// equipped skin (see class doc), so it needs its own anim key — RUN_ANIM_KEY
+// gets torn down/recreated by setEquippedSkin() whenever the player's skin
+// changes, which would otherwise yank the ghost's frames out from under it.
+const GHOST_RUN_ANIM_KEY = 'ghost-run';
+const GHOST_TINT = 0x8fd8ff;
+const GHOST_ALPHA = 0.4;
 
 /** Matches server/routes/api.ts's LEADERBOARD_LIMIT — how many pre-created row slots to build. */
 const LEADERBOARD_LIMIT = 10;
 
 /**
- * "The Vault — Getaway" runner scene, through Stage 4:
+ * "The Vault: Getaway" runner scene, through the post-Stage-4 shop pass:
  *  - Stage 1: core tap-to-jump loop (confirmed fun before anything else got built).
  *  - Stage 2A: visual polish only — parallax background, real (if simple)
  *    player/obstacle art instead of flat rectangles, small juice touches
@@ -82,6 +103,14 @@ const LEADERBOARD_LIMIT = 10;
  *  - Stage 4: a leaderboard of today's best scores per user (server-side,
  *    date-keyed the same way quest.ts is — see server/core/leaderboard.ts),
  *    with the player's own rank always shown even outside the top 10.
+ *  - Shop follow-up: skin unlock/equip taps now apply optimistically
+ *    (instant visual update, network call reconciles/rolls back after —
+ *    see applyEquipSkin/applyUnlockSkin) instead of waiting on a round
+ *    trip before anything changed on screen, which was the real source of
+ *    "switching skins feels laggy," not the redraw cost or the open/close
+ *    fade. A second shop tab ("SCENERY") reuses the exact same unlock/
+ *    equip/optimistic-update pattern applied to the parallax background's
+ *    color palette instead of the player sprite's.
  */
 export class Runner extends Scene {
   private skyline!: GameObjects.TileSprite;
@@ -91,6 +120,18 @@ export class Runner extends Scene {
   private obstacles!: Phaser.Physics.Arcade.Group;
   private jumpEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
   private landEmitter!: Phaser.GameObjects.Particles.ParticleEmitter;
+
+  // Today's #1 run's ghost — created once (hidden) in create(), then
+  // shown/repositioned/replayed per run in resetRun()/update(). See the
+  // ghostReplay/ghostAlive/ghostInputIndex fields below for playback state.
+  private ghost!: PhysicsSprite;
+  private ghostLabel!: GameObjects.Text;
+  private ghostReplay: GhostReplay | null = null;
+  private ghostInputIndex = 0;
+  private ghostAlive = false;
+  // Bumped on every loadGhostReplay() call so a slow/late response from an
+  // earlier request can't clobber a newer one if the player retries fast.
+  private ghostRequestId = 0;
   private scoreText!: GameObjects.Text;
   private promptText!: GameObjects.Text;
   private questText!: GameObjects.Text;
@@ -101,17 +142,24 @@ export class Runner extends Scene {
   private shopButtonText!: GameObjects.Text;
   private shopBackdrop!: GameObjects.Graphics;
   private shopPanelBg!: GameObjects.Graphics;
-  private shopTitleText!: GameObjects.Text;
+  private shopSkinsTabText!: GameObjects.Text;
+  private shopSceneryTabText!: GameObjects.Text;
   private shopSubtitleText!: GameObjects.Text;
   private shopCoinText!: GameObjects.Text;
   private shopCloseText!: GameObjects.Text;
   private shopSwatches: ShopSwatch[] = [];
+  private shopScenerySwatches: ShopScenerySwatch[] = [];
 
   private shopButtonRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private shopSkinsTabRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private shopSceneryTabRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private shopCloseRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private shopSwatchW = 0;
   private shopSwatchH = 0;
   private shopOpen = false;
+  private shopTab: ShopTab = 'skins';
+
+  private sceneryTextures = new Map<string, { skyline: string; midground: string; ground: string }>();
 
   private leaderboardButtonText!: GameObjects.Text;
   private leaderboardBackdrop!: GameObjects.Graphics;
@@ -140,7 +188,13 @@ export class Runner extends Scene {
   // corrected once loadPlayerProfile() resolves — same "render something
   // reasonable immediately, reconcile with the server shortly after"
   // approach as the quest status.
-  private playerProfile: PlayerProfile = { coins: 0, unlockedSkins: [DEFAULT_SKIN_ID], equippedSkin: DEFAULT_SKIN_ID };
+  private playerProfile: PlayerProfile = {
+    coins: 0,
+    unlockedSkins: [DEFAULT_SKIN_ID],
+    equippedSkin: DEFAULT_SKIN_ID,
+    unlockedScenery: [DEFAULT_SCENERY_ID],
+    equippedScenery: DEFAULT_SCENERY_ID,
+  };
 
   private state: RunState = 'ready';
   private distance = 0;
@@ -149,6 +203,14 @@ export class Runner extends Scene {
   private scrollSpeed = 220;
   private spawnTimer?: Phaser.Time.TimerEvent;
   private wasGrounded = true;
+
+  // This run's jump log, for the ghost racer feature — timestamped as ms
+  // elapsed since THIS run started (see shared/api.ts's GhostInputEvent for
+  // why that's replay-portable), reset every retry alongside everything
+  // else in resetRun. Only ever sent to the server; the server itself
+  // decides whether to keep it (only if this run becomes today's #1).
+  private runElapsedMs = 0;
+  private recordedInputs: GhostInputEvent[] = [];
 
   // Daily quest: "clear N obstacles in a single run." questTarget/
   // questCompleted default to the server's own defaults and get corrected
@@ -166,6 +228,14 @@ export class Runner extends Scene {
   private obstacleSize = 40;
   private scaleFactor = 1;
 
+  // Spawn-order counter (see spawnObstacle) and today's community death
+  // counts by that same index — deathMarkerKey is generated once in
+  // create(); deathMarkerCounts is refreshed the same "fetch once at
+  // create(), refresh again at each run start" way as the ghost replay.
+  private obstacleSpawnIndex = 0;
+  private deathMarkerCounts: Record<number, number> = {};
+  private deathMarkerKey = '';
+
   constructor() {
     super('Runner');
   }
@@ -173,17 +243,24 @@ export class Runner extends Scene {
   create(): void {
     this.cameras.main.setBackgroundColor(0x0f0f0f);
 
-    const bg = ensureBackgroundTextures(this);
     this.obstacleKeys = ensureObstacleTextures(this);
-    // Pre-generate every skin's texture set up front (cheap, only 5 skins)
-    // so equipping one later is just switching which pre-baked keys the
-    // player sprite/anim point at — no mid-game texture generation stutter.
+    // Pre-generate every skin's and every scenery's texture set up front
+    // (cheap, only 5 of each) so equipping one later is just switching
+    // which pre-baked keys the player sprite/anim or TileSprites point at
+    // — no mid-game texture generation stutter.
     this.skinTextures.clear();
     SKINS.forEach((skin) => {
       this.skinTextures.set(skin.id, ensurePlayerTexturesForSkin(this, skin.id, skin.palette));
     });
+    this.sceneryTextures.clear();
+    SCENERY.forEach((scenery) => {
+      this.sceneryTextures.set(scenery.id, ensureBackgroundTexturesForScenery(this, scenery.id, scenery.palette));
+      ensureSceneryPreviewTexture(this, scenery.id, scenery.palette);
+    });
     const sparkKey = ensureSparkTexture(this);
+    this.deathMarkerKey = ensureDeathMarkerTexture(this);
 
+    const bg = this.sceneryTextures.get(DEFAULT_SCENERY_ID)!;
     this.skyline = this.add.tileSprite(0, 0, SKYLINE_TILE.w, SKYLINE_TILE.h, bg.skyline).setOrigin(0, 1).setDepth(-30);
     this.midground = this.add
       .tileSprite(0, 0, MIDGROUND_TILE.w, MIDGROUND_TILE.h, bg.midground)
@@ -200,7 +277,42 @@ export class Runner extends Scene {
     this.physics.add.collider(this.player, this.ground);
 
     this.obstacles = this.physics.add.group();
-    this.physics.add.overlap(this.player, this.obstacles, () => this.onCollide(), undefined, this);
+    this.physics.add.overlap(
+      this.player,
+      this.obstacles,
+      (_player, obstacle) => this.onCollide(obstacle as unknown as PhysicsSprite),
+      undefined,
+      this
+    );
+
+    // Ghost: always DEFAULT_SKIN_ID's textures/anim (independent of the
+    // live player's equipped skin — see GHOST_RUN_ANIM_KEY comment), tinted
+    // + translucent to read as a silhouette, hidden until a run with a
+    // replay to play starts. Uses overlap (not collider) against obstacles,
+    // same as the real player, and no collider against the player itself —
+    // "non-physically-interacting" per the ghost racer spec.
+    const ghostTextures = this.skinTextures.get(DEFAULT_SKIN_ID)!;
+    this.ghost = this.add.sprite(0, 0, ghostTextures.run[0]!) as PhysicsSprite;
+    this.ghost.setDepth(0.8).setAlpha(GHOST_ALPHA).setTint(GHOST_TINT).setVisible(false);
+    this.anims.create({
+      key: GHOST_RUN_ANIM_KEY,
+      frames: ghostTextures.run.map((key) => ({ key })),
+      frameRate: 10,
+      repeat: -1,
+    });
+    this.physics.add.existing(this.ghost);
+    this.ghost.body.setSize(PLAYER_BODY_W, PLAYER_BODY_H);
+    this.ghost.body.setOffset(PLAYER_BODY_OFFSET_X, PLAYER_BODY_OFFSET_Y);
+    this.ghost.body.enable = false;
+    this.physics.add.collider(this.ghost, this.ground);
+    this.physics.add.overlap(this.ghost, this.obstacles, () => this.onGhostCollide(), undefined, this);
+
+    this.ghostLabel = this.add
+      .text(0, 0, '', { fontFamily: 'Arial', fontSize: '11px', color: THEME_TEXT_COLORS.textMuted })
+      .setOrigin(0.5, 1)
+      .setAlpha(0.8)
+      .setDepth(1.5)
+      .setVisible(false);
 
     this.jumpEmitter = this.add.particles(0, 0, sparkKey, {
       speed: { min: 40, max: 90 },
@@ -306,13 +418,13 @@ export class Runner extends Scene {
     // drives jump/retry — see handleTap for why.
     this.shopBackdrop = this.add.graphics().setDepth(200).setVisible(false);
     this.shopPanelBg = this.add.graphics().setDepth(201).setVisible(false);
-    this.shopTitleText = this.add
-      .text(0, 0, 'SKINS', {
-        fontFamily: 'Arial Black',
-        fontSize: '18px',
-        color: THEME_TEXT_COLORS.gold,
-        align: 'center',
-      })
+    this.shopSkinsTabText = this.add
+      .text(0, 0, 'SKINS', { fontFamily: 'Arial Black', fontSize: '16px', align: 'center' })
+      .setOrigin(0.5)
+      .setDepth(202)
+      .setVisible(false);
+    this.shopSceneryTabText = this.add
+      .text(0, 0, 'SCENERY', { fontFamily: 'Arial Black', fontSize: '16px', align: 'center' })
       .setOrigin(0.5)
       .setDepth(202)
       .setVisible(false);
@@ -352,6 +464,22 @@ export class Runner extends Scene {
       skin,
       bg: this.add.graphics().setDepth(201).setVisible(false),
       icon: this.add.image(0, 0, this.skinTextures.get(skin.id)!.run[1]!).setDepth(202).setVisible(false),
+      lockIcon: this.add.text(0, 0, '🔒', { fontSize: '14px' }).setOrigin(0.5).setDepth(203).setVisible(false),
+      label: this.add
+        .text(0, 0, '', { fontFamily: 'Arial', fontSize: '11px', color: THEME_TEXT_COLORS.textMuted, align: 'center' })
+        .setOrigin(0.5)
+        .setDepth(202)
+        .setVisible(false),
+      rect: { x: 0, y: 0, w: 0, h: 0 },
+    }));
+
+    this.shopScenerySwatches = SCENERY.map((scenery) => ({
+      scenery,
+      bg: this.add.graphics().setDepth(201).setVisible(false),
+      icon: this.add
+        .image(0, 0, ensureSceneryPreviewTexture(this, scenery.id, scenery.palette))
+        .setDepth(202)
+        .setVisible(false),
       lockIcon: this.add.text(0, 0, '🔒', { fontSize: '14px' }).setOrigin(0.5).setDepth(203).setVisible(false),
       label: this.add
         .text(0, 0, '', { fontFamily: 'Arial', fontSize: '11px', color: THEME_TEXT_COLORS.textMuted, align: 'center' })
@@ -425,6 +553,8 @@ export class Runner extends Scene {
     this.refreshCoinText();
     void this.loadQuestStatus();
     void this.loadPlayerProfile();
+    void this.loadGhostReplay();
+    void this.loadDeathMarkerCounts();
   }
 
   private layout(width: number, height: number): void {
@@ -455,6 +585,17 @@ export class Runner extends Scene {
     this.player.body.setOffset(PLAYER_BODY_OFFSET_X, PLAYER_BODY_OFFSET_Y);
     if (this.state !== 'playing') {
       this.player.setPosition(this.playerX, this.groundY - playerDispH / 2);
+    }
+
+    // Ghost is deliberately positioned at the SAME x as the player (not
+    // offset) — its recorded jump timestamps were calibrated against
+    // obstacles reaching exactly playerX, so any x offset here would make
+    // it dodge early/late relative to where the obstacle actually is.
+    this.ghost.setDisplaySize(playerDispW, playerDispH);
+    this.ghost.body.setSize(PLAYER_BODY_W, PLAYER_BODY_H);
+    this.ghost.body.setOffset(PLAYER_BODY_OFFSET_X, PLAYER_BODY_OFFSET_Y);
+    if (this.state !== 'playing') {
+      this.ghost.setPosition(this.playerX, this.groundY - playerDispH / 2);
     }
 
     this.promptText.setPosition(width / 2, height * 0.4).setWordWrapWidth(Math.min(width * 0.8, 380));
@@ -500,28 +641,54 @@ export class Runner extends Scene {
 
     this.drawShopPanelFrame(panelX, panelY, panelW, panelH);
 
-    this.shopTitleText.setPosition(width / 2, panelY + 20);
+    const tabGap = 14;
+    const tabY = panelY + 20;
+    this.shopSkinsTabText.setPosition(width / 2 - tabGap / 2, tabY).setOrigin(1, 0.5);
+    this.shopSceneryTabText.setPosition(width / 2 + tabGap / 2, tabY).setOrigin(0, 0.5);
+    const tabPad = 6;
+    this.shopSkinsTabRect = {
+      x: this.shopSkinsTabText.x - this.shopSkinsTabText.width - tabPad,
+      y: tabY - this.shopSkinsTabText.height / 2 - tabPad,
+      w: this.shopSkinsTabText.width + tabPad * 2,
+      h: this.shopSkinsTabText.height + tabPad * 2,
+    };
+    this.shopSceneryTabRect = {
+      x: this.shopSceneryTabText.x - tabPad,
+      y: tabY - this.shopSceneryTabText.height / 2 - tabPad,
+      w: this.shopSceneryTabText.width + tabPad * 2,
+      h: this.shopSceneryTabText.height + tabPad * 2,
+    };
+
     this.shopSubtitleText.setPosition(width / 2, panelY + 38).setWordWrapWidth(panelW - 32);
     this.shopCoinText.setPosition(width / 2, panelY + 60);
 
     const startX = width / 2 - budget / 2 + this.shopSwatchW / 2;
     const swatchY = panelY + headerH + this.shopSwatchH / 2;
+    const labelFontSize = Math.max(10, Math.round(this.shopSwatchW * 0.15));
 
-    this.shopSwatches.forEach((swatch, i) => {
-      const x = startX + i * (this.shopSwatchW + gap);
-      swatch.bg.setPosition(x, swatchY);
-      const iconScale = (this.shopSwatchW * 0.6) / PLAYER_BASE_W;
-      swatch.icon.setPosition(x, swatchY - this.shopSwatchH * 0.12).setScale(iconScale);
-      swatch.lockIcon.setPosition(x + this.shopSwatchW / 2 - 11, swatchY - this.shopSwatchH / 2 + 11);
-      swatch.label
-        .setPosition(x, swatchY + this.shopSwatchH * 0.34)
-        .setFontSize(Math.max(10, Math.round(this.shopSwatchW * 0.15)));
-      swatch.rect = {
-        x: x - this.shopSwatchW / 2,
-        y: swatchY - this.shopSwatchH / 2,
-        w: this.shopSwatchW,
-        h: this.shopSwatchH,
-      };
+    // Both tabs' swatch rows share the exact same positions — only one is
+    // ever visible at a time (see switchShopTab). Icon scale differs
+    // because skin icons and scenery preview icons are generated at
+    // different native resolutions (44px vs 40px) — using one shared scale
+    // factor would size one of them slightly wrong.
+    const skinIconScale = (this.shopSwatchW * 0.6) / PLAYER_BASE_W;
+    const sceneryIconScale = (this.shopSwatchW * 0.6) / SCENERY_PREVIEW_SIZE;
+
+    [this.shopSwatches, this.shopScenerySwatches].forEach((swatches, setIndex) => {
+      const iconScale = setIndex === 0 ? skinIconScale : sceneryIconScale;
+      swatches.forEach((swatch, i) => {
+        const x = startX + i * (this.shopSwatchW + gap);
+        swatch.bg.setPosition(x, swatchY);
+        swatch.icon.setPosition(x, swatchY - this.shopSwatchH * 0.12).setScale(iconScale);
+        swatch.lockIcon.setPosition(x + this.shopSwatchW / 2 - 11, swatchY - this.shopSwatchH / 2 + 11);
+        swatch.label.setPosition(x, swatchY + this.shopSwatchH * 0.34).setFontSize(labelFontSize);
+        swatch.rect = {
+          x: x - this.shopSwatchW / 2,
+          y: swatchY - this.shopSwatchH / 2,
+          w: this.shopSwatchW,
+          h: this.shopSwatchH,
+        };
+      });
     });
 
     this.shopCloseText.setPosition(width / 2, panelY + panelH - 20);
@@ -534,7 +701,9 @@ export class Runner extends Scene {
       h: closeH,
     };
 
+    this.refreshShopTabStyle();
     this.refreshShopSwatches();
+    this.refreshScenerySwatches();
   }
 
   /**
@@ -734,13 +903,55 @@ export class Runner extends Scene {
 
       swatch.icon.setAlpha(owned ? 1 : 0.32);
       swatch.icon.setTint(owned ? 0xffffff : 0x8a8a8a);
-      swatch.lockIcon.setVisible(!owned);
+      // Gated on shopOpen too, not just ownership — this runs from
+      // layoutShop(), which also runs once during initial create() and on
+      // every resize regardless of whether the shop is even open. Without
+      // the shopOpen check, a locked skin's 🔒 glyph would render on the
+      // main game screen the moment the page loads, since nothing else
+      // was gating this particular object's visibility on the shop state.
+      swatch.lockIcon.setVisible(this.shopOpen && this.shopTab === 'skins' && !owned);
 
       const labelText = equipped
         ? `${swatch.skin.name}\nEQUIPPED`
         : owned
           ? swatch.skin.name
           : `${swatch.skin.name}\n${swatch.skin.cost} coins`;
+      swatch.label.setText(labelText).setColor(equipped ? THEME_TEXT_COLORS.gold : THEME_TEXT_COLORS.textMuted);
+    });
+  }
+
+  private refreshScenerySwatches(): void {
+    const w = this.shopSwatchW;
+    const h = this.shopSwatchH;
+
+    this.shopScenerySwatches.forEach((swatch) => {
+      const owned = this.playerProfile.unlockedScenery.includes(swatch.scenery.id);
+      const equipped = this.playerProfile.equippedScenery === swatch.scenery.id;
+
+      swatch.bg.clear();
+      swatch.bg.fillStyle(0x000000, 0.35);
+      swatch.bg.fillRoundedRect(-w / 2 + 3, -h / 2 + 4, w, h, 8);
+      swatch.bg.fillStyle(owned ? THEME_COLORS.steel : 0x201f22, 1);
+      swatch.bg.fillRoundedRect(-w / 2, -h / 2, w, h, 8);
+      swatch.bg.lineStyle(1, owned ? THEME_COLORS.gold : THEME_COLORS.steelDark, owned ? 0.35 : 0.9);
+      swatch.bg.strokeRoundedRect(-w / 2, -h / 2, w, h, 8);
+
+      if (equipped) {
+        swatch.bg.lineStyle(6, THEME_COLORS.gold, 0.18);
+        swatch.bg.strokeRoundedRect(-w / 2 - 2, -h / 2 - 2, w + 4, h + 4, 10);
+        swatch.bg.lineStyle(3, THEME_COLORS.gold, 1);
+        swatch.bg.strokeRoundedRect(-w / 2, -h / 2, w, h, 8);
+      }
+
+      swatch.icon.setAlpha(owned ? 1 : 0.32);
+      swatch.icon.setTint(owned ? 0xffffff : 0x8a8a8a);
+      swatch.lockIcon.setVisible(this.shopOpen && this.shopTab === 'scenery' && !owned);
+
+      const labelText = equipped
+        ? `${swatch.scenery.name}\nEQUIPPED`
+        : owned
+          ? swatch.scenery.name
+          : `${swatch.scenery.name}\n${swatch.scenery.cost} coins`;
       swatch.label.setText(labelText).setColor(equipped ? THEME_TEXT_COLORS.gold : THEME_TEXT_COLORS.textMuted);
     });
   }
@@ -758,36 +969,105 @@ export class Runner extends Scene {
     this.leaderboardButtonText.setVisible(visible);
   }
 
+  private activeSwatches(): ShopSwatchVisuals[] {
+    return this.shopTab === 'skins' ? this.shopSwatches : this.shopScenerySwatches;
+  }
+
+  private inactiveSwatches(): ShopSwatchVisuals[] {
+    return this.shopTab === 'skins' ? this.shopScenerySwatches : this.shopSwatches;
+  }
+
+  private refreshShopTabStyle(): void {
+    this.shopSkinsTabText.setColor(this.shopTab === 'skins' ? THEME_TEXT_COLORS.gold : THEME_TEXT_COLORS.textMuted);
+    this.shopSceneryTabText.setColor(this.shopTab === 'scenery' ? THEME_TEXT_COLORS.gold : THEME_TEXT_COLORS.textMuted);
+  }
+
+  /**
+   * Switching tabs is deliberately instant — no fade, no network call. This
+   * is exactly the kind of interaction that felt laggy before the
+   * optimistic-update fix elsewhere in this file, so staying snappy here
+   * is intentional, not an oversight.
+   */
+  private switchShopTab(tab: ShopTab): void {
+    if (this.shopTab === tab) return;
+    this.shopTab = tab;
+
+    this.inactiveSwatches().forEach((s) => {
+      s.bg.setVisible(false);
+      s.icon.setVisible(false);
+      s.label.setVisible(false);
+      s.lockIcon.setVisible(false);
+    });
+
+    // Refresh first so icon alpha (dimmed if locked) and lockIcon
+    // visibility are correct for the tab being switched INTO, then just
+    // show everything — the refresh call already gates lockIcon on
+    // shopOpen + this.shopTab, so it doesn't need touching again here.
+    if (tab === 'skins') this.refreshShopSwatches();
+    else this.refreshScenerySwatches();
+
+    this.activeSwatches().forEach((s) => {
+      s.bg.setVisible(true).setAlpha(1);
+      s.icon.setVisible(true);
+      s.label.setVisible(true).setAlpha(1);
+    });
+
+    this.shopSubtitleText.setText(
+      tab === 'skins' ? "the fence's stash — no questions asked" : 'paint the town — one coin at a time'
+    );
+    this.refreshShopTabStyle();
+  }
+
   private openShop(): void {
     if (this.shopOpen) return;
     this.shopOpen = true;
     // Sets each icon's ownership-dependent alpha (1 or dimmed) and each
-    // lockIcon's visibility BEFORE the fade below reads/uses them.
+    // lockIcon's visibility (gated on shopOpen + active tab) for BOTH tabs,
+    // before anything below reads/shows them.
     this.refreshShopSwatches();
+    this.refreshScenerySwatches();
+    this.refreshShopTabStyle();
+
+    const active = this.activeSwatches();
+    // The inactive tab's swatches must stay fully hidden even though the
+    // shop itself is opening — refresh above already keeps their lockIcon
+    // correctly hidden, but bg/icon/label aren't tab-aware, so hide those
+    // explicitly.
+    this.inactiveSwatches().forEach((s) => {
+      s.bg.setVisible(false);
+      s.icon.setVisible(false);
+      s.label.setVisible(false);
+    });
 
     const fixed = [
       this.shopBackdrop,
       this.shopPanelBg,
-      this.shopTitleText,
+      this.shopSkinsTabText,
+      this.shopSceneryTabText,
       this.shopSubtitleText,
       this.shopCoinText,
       this.shopCloseText,
     ];
-    const bgAndLabels = this.shopSwatches.flatMap((s) => [s.bg, s.label, s.lockIcon]);
-    const icons = this.shopSwatches.map((s) => s.icon);
+    const bgAndLabels = [...fixed, ...active.flatMap((s) => [s.bg, s.label])];
+    const icons = active.map((s) => s.icon);
+    const lockIcons = active.map((s) => s.lockIcon);
 
-    [...fixed, ...bgAndLabels, ...icons].forEach((o) => o.setVisible(true));
+    [...bgAndLabels, ...icons].forEach((o) => o.setVisible(true));
+    // lockIcon visibility is left exactly as the refresh calls above set
+    // it (true only for locked tiles) — never force it visible here, that
+    // was the bug: showing a lock glyph on an owned tile regardless of
+    // ownership.
 
-    // Fixed chrome + tile backgrounds/labels/lock glyphs always fade to
-    // full opacity. Each skin icon fades to whatever refreshShopSwatches
-    // just set it to (dimmed if locked) — captured before zeroing, so a
-    // locked tile's icon doesn't flash at full brightness mid-fade.
-    [...fixed, ...bgAndLabels].forEach((o) => o.setAlpha(0));
-    this.tweens.add({ targets: [...fixed, ...bgAndLabels], alpha: 1, duration: 160, ease: 'Sine.easeOut' });
+    bgAndLabels.forEach((o) => o.setAlpha(0));
+    this.tweens.add({ targets: bgAndLabels, alpha: 1, duration: 160, ease: 'Sine.easeOut' });
     icons.forEach((icon) => {
       const target = icon.alpha;
       icon.setAlpha(0);
       this.tweens.add({ targets: icon, alpha: target, duration: 160, ease: 'Sine.easeOut' });
+    });
+    lockIcons.forEach((lockIcon) => {
+      lockIcon.setAlpha(0);
+      this.tweens.add({ targets: lockIcon, alpha: 1, duration: 160, ease: 'Sine.easeOut' });
     });
 
     this.refreshMenuButtonsVisibility();
@@ -800,11 +1080,13 @@ export class Runner extends Scene {
     const allObjects = [
       this.shopBackdrop,
       this.shopPanelBg,
-      this.shopTitleText,
+      this.shopSkinsTabText,
+      this.shopSceneryTabText,
       this.shopSubtitleText,
       this.shopCoinText,
       this.shopCloseText,
       ...this.shopSwatches.flatMap((s) => [s.bg, s.icon, s.label, s.lockIcon]),
+      ...this.shopScenerySwatches.flatMap((s) => [s.bg, s.icon, s.label, s.lockIcon]),
     ];
     this.tweens.add({
       targets: allObjects,
@@ -833,6 +1115,14 @@ export class Runner extends Scene {
     }
   }
 
+  /** Swaps which pre-generated texture set the parallax TileSprites use — tilePositionX (scroll offset) is untouched, so this never causes a visible "jump" mid-scroll. */
+  private setEquippedScenery(sceneryId: string): void {
+    const textures = this.sceneryTextures.get(sceneryId) ?? this.sceneryTextures.get(DEFAULT_SCENERY_ID)!;
+    this.skyline.setTexture(textures.skyline);
+    this.midground.setTexture(textures.midground);
+    this.ground.setTexture(textures.ground);
+  }
+
   /**
    * Single global pointerdown handler for the whole scene — jump/retry, the
    * shop, and the leaderboard all go through here, dispatched by manual
@@ -854,8 +1144,21 @@ export class Runner extends Scene {
         this.closeShop();
         return;
       }
-      const hit = this.shopSwatches.find((s) => pointInRect(s.rect, pointer.x, pointer.y));
-      if (hit) this.onSwatchTap(hit);
+      if (pointInRect(this.shopSkinsTabRect, pointer.x, pointer.y)) {
+        this.switchShopTab('skins');
+        return;
+      }
+      if (pointInRect(this.shopSceneryTabRect, pointer.x, pointer.y)) {
+        this.switchShopTab('scenery');
+        return;
+      }
+      if (this.shopTab === 'skins') {
+        const hit = this.shopSwatches.find((s) => pointInRect(s.rect, pointer.x, pointer.y));
+        if (hit) this.onSwatchTap(hit);
+      } else {
+        const hit = this.shopScenerySwatches.find((s) => pointInRect(s.rect, pointer.x, pointer.y));
+        if (hit) this.onScenerySwatchTap(hit);
+      }
       return;
     }
 
@@ -881,15 +1184,25 @@ export class Runner extends Scene {
     if (this.player.body.blocked.down || this.player.body.touching.down) {
       this.player.body.setVelocityY(-620 * this.scaleFactor);
       this.jumpEmitter.explode(6, this.player.x, this.player.y + this.player.displayHeight / 2);
+      this.recordedInputs.push({ t: Math.round(this.runElapsedMs), action: 'jump' });
     }
   }
 
   private resetRun(startPlaying: boolean): void {
+    // Marker Images are tracked outside the obstacles group (see
+    // spawnObstacle/maybeAttachDeathMarker), so obstacles.clear() alone
+    // would leak them — destroy each one first.
+    this.obstacles.getChildren().forEach((child) => {
+      (child.getData('marker') as GameObjects.Image | undefined)?.destroy();
+    });
     this.obstacles.clear(true, true);
     this.spawnTimer?.remove();
     this.distance = 0;
     this.distanceFloat = 0;
     this.wasGrounded = true;
+    this.runElapsedMs = 0;
+    this.recordedInputs = [];
+    this.obstacleSpawnIndex = 0;
     // Re-seeded fresh every run from the same daily seed, so a retry
     // reproduces the identical obstacle sequence rather than continuing
     // wherever the previous run's RNG stream happened to leave off.
@@ -905,6 +1218,20 @@ export class Runner extends Scene {
     this.player.anims.stop();
     this.player.setTexture(this.equippedRunKeys[1]!);
 
+    // Snapshot whatever replay is currently cached — see loadGhostReplay()
+    // for why this run uses the last-resolved fetch rather than blocking
+    // run start on a fresh network round trip.
+    this.ghostInputIndex = 0;
+    this.ghostAlive = startPlaying && this.ghostReplay !== null;
+    this.ghost.setPosition(this.playerX, this.groundY - (PLAYER_BASE_H * this.scaleFactor) / 2);
+    this.ghost.body.setVelocity(0, 0);
+    (this.ghost.body as Phaser.Physics.Arcade.Body).enable = this.ghostAlive;
+    this.ghost.anims.stop();
+    this.ghost.setTexture(this.skinTextures.get(DEFAULT_SKIN_ID)!.run[1]!);
+    this.ghost.setVisible(this.ghostAlive);
+    this.ghostLabel.setText(this.ghostReplay ? `👻 ${this.ghostReplay.username}` : '');
+    this.ghostLabel.setVisible(this.ghostAlive);
+
     if (startPlaying) {
       this.state = 'playing';
       this.promptText.setVisible(false);
@@ -916,6 +1243,11 @@ export class Runner extends Scene {
         loop: true,
         callback: () => this.spawnObstacle(),
       });
+      // Kick off fresh fetches so the NEXT run (retry or otherwise) picks
+      // up any #1/death-count change that happened since — never blocks
+      // this run.
+      void this.loadGhostReplay();
+      void this.loadDeathMarkerCounts();
     } else {
       this.state = 'ready';
       this.promptText.setText('TAP TO START').setVisible(true);
@@ -939,9 +1271,17 @@ export class Runner extends Scene {
     body.setSize(OBSTACLE_BASE, OBSTACLE_BASE);
     body.setAllowGravity(false);
     body.setVelocityX(-this.scrollSpeed);
+
+    // Spawn-order counter, not time or position — deterministic from the
+    // daily seed regardless of client framerate, so "the Nth obstacle
+    // spawned" means the same physical obstacle across every player's run
+    // today (see shared/api.ts's RunCompleteRequest.deathObstacleIndex).
+    const spawnIndex = this.obstacleSpawnIndex++;
+    obstacle.setData('spawnIndex', spawnIndex);
+    this.maybeAttachDeathMarker(obstacle, spawnIndex);
   }
 
-  private onCollide(): void {
+  private onCollide(obstacle: PhysicsSprite): void {
     if (this.state !== 'playing') return;
     this.state = 'gameover';
     this.spawnTimer?.remove();
@@ -952,16 +1292,34 @@ export class Runner extends Scene {
     this.best = Math.max(this.best, this.distance);
     this.promptText.setText(`GAME OVER\nScore: ${this.distance}\nBest: ${this.best}\n\nTap to retry`).setVisible(true);
     this.refreshMenuButtonsVisibility();
-    void this.reportRunComplete(this.distance);
+    const deathObstacleIndex = obstacle.getData('spawnIndex') as number | undefined;
+    void this.reportRunComplete(this.distance, this.recordedInputs, deathObstacleIndex);
   }
 
   private spawnLandingBurst(): void {
     this.landEmitter.explode(8, this.player.x, this.player.y + this.player.displayHeight / 2);
   }
 
+  /**
+   * The ghost's own death — independent of the real player's onCollide, and
+   * deliberately not ending or otherwise affecting the live run. Since the
+   * ghost replays the same recorded inputs against this run's identically-
+   * seeded obstacles in real time, its own overlap firing naturally lands
+   * at the same obstacle the original run died on, with no separate death
+   * timestamp needing to be recorded/sent.
+   */
+  private onGhostCollide(): void {
+    if (!this.ghostAlive) return;
+    this.ghostAlive = false;
+    this.ghost.setVisible(false);
+    this.ghostLabel.setVisible(false);
+    (this.ghost.body as Phaser.Physics.Arcade.Body).enable = false;
+  }
+
   override update(_time: number, delta: number): void {
     if (this.state !== 'playing') return;
 
+    this.runElapsedMs += delta;
     this.distanceFloat += (this.scrollSpeed * delta) / 1000;
     this.distance = Math.floor(this.distanceFloat);
     this.scoreText.setText(String(this.distance));
@@ -981,9 +1339,33 @@ export class Runner extends Scene {
     }
     this.wasGrounded = grounded;
 
+    if (this.ghostAlive && this.ghostReplay) {
+      const inputs = this.ghostReplay.inputs;
+      const ghostBody = this.ghost.body as Phaser.Physics.Arcade.Body;
+      while (this.ghostInputIndex < inputs.length && inputs[this.ghostInputIndex]!.t <= this.runElapsedMs) {
+        if (ghostBody.blocked.down || ghostBody.touching.down) {
+          ghostBody.setVelocityY(-620 * this.scaleFactor);
+        }
+        this.ghostInputIndex++;
+      }
+      const ghostGrounded = ghostBody.blocked.down || ghostBody.touching.down;
+      if (ghostGrounded) {
+        this.ghost.play(GHOST_RUN_ANIM_KEY, true);
+      } else {
+        this.ghost.anims.stop();
+        this.ghost.setTexture(this.skinTextures.get(DEFAULT_SKIN_ID)!.jump);
+      }
+      this.ghostLabel.setPosition(this.ghost.x, this.ghost.y - this.ghost.displayHeight / 2 - 6);
+    }
+
     this.obstacles.getChildren().forEach((child) => {
       const sprite = child as GameObjects.Sprite;
+      const marker = sprite.getData('marker') as GameObjects.Image | undefined;
+      if (marker) {
+        marker.setPosition(sprite.x, sprite.y - this.obstacleSize / 2 - marker.displayHeight / 2 - 2);
+      }
       if (sprite.x < -this.obstacleSize) {
+        marker?.destroy();
         this.obstacles.remove(sprite, true, true);
         // Reaching this point only happens while state === 'playing', i.e.
         // no collision has ended the run yet — so scrolling fully off
@@ -992,6 +1374,17 @@ export class Runner extends Scene {
         this.checkQuestProgress();
       }
     });
+  }
+
+  /** Attaches a small "danger tag" marker above `obstacle` if today's death count at `spawnIndex` meets DEATH_MARKER_THRESHOLD — purely visual, no physics/gameplay effect. */
+  private maybeAttachDeathMarker(obstacle: GameObjects.Sprite, spawnIndex: number): void {
+    if ((this.deathMarkerCounts[spawnIndex] ?? 0) < DEATH_MARKER_THRESHOLD) return;
+    const markerSize = DEATH_MARKER_SIZE * this.scaleFactor;
+    const marker = this.add
+      .image(obstacle.x, obstacle.y - this.obstacleSize / 2 - markerSize / 2 - 2, this.deathMarkerKey)
+      .setDisplaySize(markerSize, markerSize)
+      .setDepth(0.9);
+    obstacle.setData('marker', marker);
   }
 
   private async loadQuestStatus(): Promise<void> {
@@ -1060,27 +1453,81 @@ export class Runner extends Scene {
       const data = (await res.json()) as PlayerResponse;
       this.playerProfile = data.profile;
       this.setEquippedSkin(this.playerProfile.equippedSkin);
+      this.setEquippedScenery(this.playerProfile.equippedScenery);
       this.refreshCoinText();
       this.refreshShopSwatches();
+      this.refreshScenerySwatches();
     } catch {
-      // Non-critical — coins/skins just keep showing their defaults until
-      // the next successful load.
+      // Non-critical — coins/skins/scenery just keep showing their
+      // defaults until the next successful load.
     }
   }
 
-  /** Reports a finished run's distance so the (server-authoritative) coin balance updates — see server/routes/api.ts's /run-complete for why this isn't computed client-side. */
-  private async reportRunComplete(distance: number): Promise<void> {
+  /**
+   * Fetches today's #1 run's replay (null if nobody's posted a score yet).
+   * Only updates this.ghostReplay/label — does NOT touch ghostAlive or the
+   * ghost sprite's visibility, since resetRun() decides per-run whether to
+   * actually play it back (see its comment for why this snapshot approach
+   * is fine). The requestId guard means a slow response from a request
+   * kicked off by an earlier run can't stomp a newer one.
+   */
+  private async loadGhostReplay(): Promise<void> {
+    const requestId = ++this.ghostRequestId;
+    try {
+      const res = await fetch('/api/ghost');
+      if (!res.ok) return;
+      const data = (await res.json()) as GhostResponse;
+      if (requestId !== this.ghostRequestId) return;
+      this.ghostReplay = data.replay;
+    } catch {
+      // Best-effort — worst case this run just has no ghost to play back.
+    }
+  }
+
+  /**
+   * Fetches today's raw per-obstacle-index death counts. Only updates
+   * this.deathMarkerCounts, read by maybeAttachDeathMarker() the next time
+   * (or times) spawnObstacle() runs — an in-flight run's already-spawned
+   * obstacles don't retroactively grow markers, which is fine for a purely
+   * ambient hint.
+   */
+  private async loadDeathMarkerCounts(): Promise<void> {
+    try {
+      const res = await fetch('/api/death-markers');
+      if (!res.ok) return;
+      const data = (await res.json()) as DeathMarkersResponse;
+      this.deathMarkerCounts = data.counts;
+    } catch {
+      // Best-effort — worst case no markers show up this run.
+    }
+  }
+
+  /**
+   * Reports a finished run's distance so the (server-authoritative) coin
+   * balance updates — see server/routes/api.ts's /run-complete for why this
+   * isn't computed client-side. `inputs` is this run's jump log; the server
+   * only actually persists it if this run becomes today's new #1, so it's
+   * cheap to always include. `deathObstacleIndex` is which obstacle ended
+   * this run (undefined if it somehow didn't end in a collision), fed into
+   * the community death-marker aggregate.
+   */
+  private async reportRunComplete(
+    distance: number,
+    inputs: GhostInputEvent[],
+    deathObstacleIndex: number | undefined
+  ): Promise<void> {
     try {
       const res = await fetch('/api/run-complete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ distance }),
+        body: JSON.stringify({ distance, inputs, deathObstacleIndex }),
       });
       if (!res.ok) return;
       const data = (await res.json()) as PlayerResponse;
       this.playerProfile = data.profile;
       this.refreshCoinText();
       this.refreshShopSwatches();
+      this.refreshScenerySwatches();
     } catch {
       // Best-effort — worst case this run's coins don't get credited, not
       // a broken experience (the run itself already fully played out).
@@ -1091,7 +1538,7 @@ export class Runner extends Scene {
     const owned = this.playerProfile.unlockedSkins.includes(swatch.skin.id);
     if (owned) {
       if (this.playerProfile.equippedSkin !== swatch.skin.id) {
-        void this.equipSkinRequest(swatch.skin.id);
+        this.applyEquipSkin(swatch.skin.id);
       }
       return;
     }
@@ -1099,15 +1546,74 @@ export class Runner extends Scene {
       this.flashInsufficientFunds(swatch);
       return;
     }
-    void this.unlockSkinRequest(swatch.skin.id);
+    this.applyUnlockSkin(swatch.skin);
   }
 
-  private flashInsufficientFunds(swatch: ShopSwatch): void {
+  private flashInsufficientFunds(swatch: ShopSwatchVisuals): void {
     swatch.label.setText('Need more\ncoins').setColor('#ff6b6b');
-    this.time.delayedCall(900, () => this.refreshShopSwatches());
+    const tab = this.shopTab;
+    this.time.delayedCall(900, () => {
+      if (tab === 'skins') this.refreshShopSwatches();
+      else this.refreshScenerySwatches();
+    });
   }
 
-  private async unlockSkinRequest(skinId: string): Promise<void> {
+  /**
+   * Optimistic update: apply the equip locally and redraw immediately —
+   * switching skins used to wait on a full network round-trip before
+   * anything on screen changed, which is what actually made it feel
+   * laggy (the Graphics redraw itself is a handful of tiny shape fills,
+   * sub-millisecond). The request below just reconciles with the server's
+   * authoritative response afterward; on failure it rolls back to
+   * whatever was true before the tap rather than leaving the UI showing
+   * something the server never confirmed.
+   */
+  private applyEquipSkin(skinId: string): void {
+    const previous = this.playerProfile;
+    this.playerProfile = { ...this.playerProfile, equippedSkin: skinId };
+    this.setEquippedSkin(skinId);
+    this.refreshShopSwatches();
+    void this.equipSkinRequest(skinId, previous);
+  }
+
+  private applyUnlockSkin(skin: SkinDef): void {
+    const previous = this.playerProfile;
+    // Mirrors exactly what server/core/player.ts's unlockSkin does, so the
+    // optimistic state matches the confirmed response in the common case.
+    this.playerProfile = {
+      ...previous,
+      coins: previous.coins - skin.cost,
+      unlockedSkins: [...previous.unlockedSkins, skin.id],
+      equippedSkin: skin.id,
+    };
+    this.setEquippedSkin(skin.id);
+    this.refreshCoinText();
+    this.refreshShopSwatches();
+    void this.unlockSkinRequest(skin.id, previous);
+  }
+
+  private async equipSkinRequest(skinId: string, previous: PlayerProfile): Promise<void> {
+    try {
+      const res = await fetch('/api/skins/equip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skinId }),
+      });
+      const data = (await res.json()) as SkinActionResponse;
+      // Always reconcile to the server's authoritative profile, whether it
+      // confirmed the optimistic change or not — in the common case this
+      // just re-applies what's already showing.
+      this.playerProfile = data.profile;
+      this.setEquippedSkin(this.playerProfile.equippedSkin);
+      this.refreshShopSwatches();
+    } catch {
+      this.playerProfile = previous;
+      this.setEquippedSkin(previous.equippedSkin);
+      this.refreshShopSwatches();
+    }
+  }
+
+  private async unlockSkinRequest(skinId: string, previous: PlayerProfile): Promise<void> {
     try {
       const res = await fetch('/api/skins/unlock', {
         method: 'POST',
@@ -1116,27 +1622,92 @@ export class Runner extends Scene {
       });
       const data = (await res.json()) as SkinActionResponse;
       this.playerProfile = data.profile;
-      if (data.status === 'ok') this.setEquippedSkin(this.playerProfile.equippedSkin);
+      this.setEquippedSkin(this.playerProfile.equippedSkin);
       this.refreshCoinText();
       this.refreshShopSwatches();
     } catch {
-      // Best-effort — the shop just doesn't update; the player can retry the tap.
+      this.playerProfile = previous;
+      this.setEquippedSkin(previous.equippedSkin);
+      this.refreshCoinText();
+      this.refreshShopSwatches();
     }
   }
 
-  private async equipSkinRequest(skinId: string): Promise<void> {
+  // --- Scenery: exact mirror of the skin unlock/equip flow above, applied
+  // to the parallax background's palette instead of the player sprite's.
+
+  private onScenerySwatchTap(swatch: ShopScenerySwatch): void {
+    const owned = this.playerProfile.unlockedScenery.includes(swatch.scenery.id);
+    if (owned) {
+      if (this.playerProfile.equippedScenery !== swatch.scenery.id) {
+        this.applyEquipScenery(swatch.scenery.id);
+      }
+      return;
+    }
+    if (this.playerProfile.coins < swatch.scenery.cost) {
+      this.flashInsufficientFunds(swatch);
+      return;
+    }
+    this.applyUnlockScenery(swatch.scenery);
+  }
+
+  private applyEquipScenery(sceneryId: string): void {
+    const previous = this.playerProfile;
+    this.playerProfile = { ...this.playerProfile, equippedScenery: sceneryId };
+    this.setEquippedScenery(sceneryId);
+    this.refreshScenerySwatches();
+    void this.equipSceneryRequest(sceneryId, previous);
+  }
+
+  private applyUnlockScenery(scenery: SceneryDef): void {
+    const previous = this.playerProfile;
+    this.playerProfile = {
+      ...previous,
+      coins: previous.coins - scenery.cost,
+      unlockedScenery: [...previous.unlockedScenery, scenery.id],
+      equippedScenery: scenery.id,
+    };
+    this.setEquippedScenery(scenery.id);
+    this.refreshCoinText();
+    this.refreshScenerySwatches();
+    void this.unlockSceneryRequest(scenery.id, previous);
+  }
+
+  private async equipSceneryRequest(sceneryId: string, previous: PlayerProfile): Promise<void> {
     try {
-      const res = await fetch('/api/skins/equip', {
+      const res = await fetch('/api/scenery/equip', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ skinId }),
+        body: JSON.stringify({ sceneryId }),
       });
-      const data = (await res.json()) as SkinActionResponse;
+      const data = (await res.json()) as SceneryActionResponse;
       this.playerProfile = data.profile;
-      if (data.status === 'ok') this.setEquippedSkin(this.playerProfile.equippedSkin);
-      this.refreshShopSwatches();
+      this.setEquippedScenery(this.playerProfile.equippedScenery);
+      this.refreshScenerySwatches();
     } catch {
-      // Best-effort — the shop just doesn't update; the player can retry the tap.
+      this.playerProfile = previous;
+      this.setEquippedScenery(previous.equippedScenery);
+      this.refreshScenerySwatches();
+    }
+  }
+
+  private async unlockSceneryRequest(sceneryId: string, previous: PlayerProfile): Promise<void> {
+    try {
+      const res = await fetch('/api/scenery/unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sceneryId }),
+      });
+      const data = (await res.json()) as SceneryActionResponse;
+      this.playerProfile = data.profile;
+      this.setEquippedScenery(this.playerProfile.equippedScenery);
+      this.refreshCoinText();
+      this.refreshScenerySwatches();
+    } catch {
+      this.playerProfile = previous;
+      this.setEquippedScenery(previous.equippedScenery);
+      this.refreshCoinText();
+      this.refreshScenerySwatches();
     }
   }
 }

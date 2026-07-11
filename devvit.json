@@ -33,38 +33,30 @@
         "endpoint": "/internal/menu/post-create"
       },
       {
-        "label": "[DEV ONLY] Reset today's vault",
-        "description": "Wipes today's vault + attempts for testing. Only works on the dev test subreddit — remove before a real launch.",
+        "label": "[DEV ONLY] Give yourself 1000 coins",
+        "description": "Credits your own coin balance for testing shop unlocks (skins, scenery). Only works on the dev test subreddit — remove before a real launch.",
         "location": "subreddit",
         "forUserType": "moderator",
-        "endpoint": "/internal/menu/dev-reset-vault"
+        "endpoint": "/internal/menu/dev-add-coins"
       },
       {
-        "label": "[DEV ONLY] Run rotation now",
-        "description": "Closes today's vault and archives it immediately, for testing. Only works on the dev test subreddit — remove before a real launch.",
+        "label": "[DEV ONLY] Clear my leaderboard entry today",
+        "description": "Wipes your own today's leaderboard score (and today's ghost replay, if it was yours) for clean ghost racer re-testing. Only works on the dev test subreddit — remove before a real launch.",
         "location": "subreddit",
         "forUserType": "moderator",
-        "endpoint": "/internal/menu/dev-rotate-now"
+        "endpoint": "/internal/menu/dev-clear-my-score"
       },
       {
-        "label": "[DEV ONLY] Reveal current combination",
-        "description": "Toasts + logs today's real combination so the crack-reveal path can be tested live. Only works on the dev test subreddit — remove before a real launch.",
+        "label": "[DEV ONLY] Bump first obstacle to death threshold",
+        "description": "Sets today's death count for the first obstacle to the marker threshold, so the community death-marker badge can be tested without dying there repeatedly. Only works on the dev test subreddit — remove before a real launch.",
         "location": "subreddit",
         "forUserType": "moderator",
-        "endpoint": "/internal/menu/dev-reveal-combination"
+        "endpoint": "/internal/menu/dev-bump-death-marker"
       }
     ]
   },
   "triggers": {
     "onAppInstall": "/internal/triggers/on-app-install"
-  },
-  "scheduler": {
-    "tasks": {
-      "daily-vault-rotation": {
-        "endpoint": "/internal/scheduler/daily-rotation",
-        "cron": "0 0 * * *"
-      }
-    }
   },
   "scripts": {
     "build": "vite build",
