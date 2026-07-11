@@ -4,7 +4,8 @@ export type BoardEntry = {
   userId: string;
   username: string;
   guess: string;
-  score: number;
+  correctPosition: number;
+  correctDigitWrongPosition: number;
   ts: number;
 };
 
@@ -20,7 +21,8 @@ export type VaultPublicState = {
 
 export type MyAttempt = {
   guess: string;
-  score: number;
+  correctPosition: number;
+  correctDigitWrongPosition: number;
   ts: number;
 };
 
@@ -48,7 +50,8 @@ export type GuessResponse =
   | {
       type: 'guess';
       status: 'ok';
-      score: number;
+      correctPosition: number;
+      correctDigitWrongPosition: number;
       cracked: boolean;
       vault: VaultPublicState;
       board: BoardEntry[];
@@ -63,7 +66,8 @@ export type GuessResponse =
 export type ArchiveScoreEntry = {
   userId: string;
   username: string;
-  score: number;
+  correctPosition: number;
+  correctDigitWrongPosition: number;
 };
 
 export type ArchiveEntry =
@@ -86,4 +90,55 @@ export type ArchiveEntry =
 export type ArchiveResponse = {
   type: 'archive';
   entries: ArchiveEntry[];
+};
+
+// --- Runner game types below. The vault types above are the old
+// (soon-to-be-removed, per the pivot) combination-guessing backend, left
+// in place only because vault.ts still depends on them.
+
+export type QuestStatus = {
+  date: string; // YYYY-MM-DD, UTC — a new date means a fresh, unearned quest
+  target: number; // obstacles to clear in a single run to complete it
+  completed: boolean;
+};
+
+export type QuestResponse = {
+  type: 'quest';
+  quest: QuestStatus;
+};
+
+export type PlayerProfile = {
+  coins: number;
+  unlockedSkins: string[];
+  equippedSkin: string;
+};
+
+export type PlayerResponse = {
+  type: 'player';
+  profile: PlayerProfile;
+};
+
+export type RunCompleteRequest = {
+  distance: number;
+};
+
+export type SkinActionRequest = {
+  skinId: string;
+};
+
+export type SkinActionResponse =
+  | { type: 'skin'; status: 'ok'; profile: PlayerProfile }
+  | { type: 'skin'; status: 'error'; error: string; profile: PlayerProfile };
+
+export type LeaderboardEntry = {
+  userId: string;
+  username: string;
+  score: number;
+};
+
+export type LeaderboardResponse = {
+  type: 'leaderboard';
+  top: LeaderboardEntry[];
+  /** The requesting user's own rank/best-today, even when not in `top` — null if they haven't posted a score today (or aren't logged in). */
+  me: { rank: number; score: number } | null;
 };

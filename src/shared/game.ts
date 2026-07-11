@@ -33,17 +33,35 @@ export const validateGuessFormat = (guess: string): GuessValidation => {
   return { valid: true };
 };
 
+export type Score = {
+  /** "Black peg" count: digits correct AND in the correct position. */
+  correctPosition: number;
+  /** "White peg" count: digits that appear in the combination, just not at that position. */
+  correctDigitWrongPosition: number;
+};
+
 /**
- * Mastermind-style "black peg" count: digits that are correct AND in the
- * correct position. Never reveals which positions matched, only the count.
+ * Full Mastermind-style scoring. Since combinations are 5 unique digits with
+ * no repeats, this is simple: any guessed digit not in the right position is
+ * a "wrong position" hit as long as it appears somewhere else in the
+ * combination — no duplicate-digit bookkeeping needed.
+ *
+ * correctPosition + correctDigitWrongPosition can never exceed
+ * COMBINATION_LENGTH, since that's the total number of digits shared between
+ * two 5-unique-digit strings in the best case.
  */
-export const scoreGuess = (guess: string, combination: string): number => {
+export const scoreGuess = (guess: string, combination: string): Score => {
   if (guess.length !== combination.length) {
     throw new Error('Guess and combination must be the same length.');
   }
-  let exact = 0;
+  let correctPosition = 0;
+  let correctDigitWrongPosition = 0;
   for (let i = 0; i < combination.length; i++) {
-    if (guess[i] === combination[i]) exact++;
+    if (guess[i] === combination[i]) {
+      correctPosition++;
+    } else if (combination.includes(guess[i]!)) {
+      correctDigitWrongPosition++;
+    }
   }
-  return exact;
+  return { correctPosition, correctDigitWrongPosition };
 };

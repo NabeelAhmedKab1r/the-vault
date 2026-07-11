@@ -21,14 +21,16 @@ type VaultRecord = {
 type StoredAttempt = {
   username: string;
   guess: string;
-  score: number;
+  correctPosition: number;
+  correctDigitWrongPosition: number;
   ts: number;
 };
 
 export type SubmitGuessResult =
   | {
       status: 'ok';
-      score: number;
+      correctPosition: number;
+      correctDigitWrongPosition: number;
       cracked: boolean;
       vault: VaultPublicState;
       board: BoardEntry[];
@@ -128,7 +130,8 @@ export const getBoard = async (date: string): Promise<BoardEntry[]> => {
       userId,
       username: attempt.username,
       guess: attempt.guess,
-      score: attempt.score,
+      correctPosition: attempt.correctPosition,
+      correctDigitWrongPosition: attempt.correctDigitWrongPosition,
       ts: attempt.ts,
     };
   });
@@ -201,21 +204,28 @@ export const submitGuess = async (
     };
   }
 
-  const score = scoreGuess(rawGuess, vault.combination);
-  const attempt: StoredAttempt = { username, guess: rawGuess, score, ts: Date.now() };
+  const { correctPosition, correctDigitWrongPosition } = scoreGuess(rawGuess, vault.combination);
+  const attempt: StoredAttempt = {
+    username,
+    guess: rawGuess,
+    correctPosition,
+    correctDigitWrongPosition,
+    ts: Date.now(),
+  };
 
   const claimed = await redis.hSetNX(attemptsKey(vault.date), userId, JSON.stringify(attempt));
   if (!claimed) {
     return { status: 'error', error: 'You already made your one guess for today.' };
   }
 
-  const cracked = score === COMBINATION_LENGTH;
+  const cracked = correctPosition === COMBINATION_LENGTH;
   const finalVault = cracked ? await markCracked(vault, userId, username, attempt.ts) : vault;
   const board = await getBoard(vault.date);
 
   return {
     status: 'ok',
-    score,
+    correctPosition,
+    correctDigitWrongPosition,
     cracked,
     vault: toPublicVaultState(finalVault),
     board,

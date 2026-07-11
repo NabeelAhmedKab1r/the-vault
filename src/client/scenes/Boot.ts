@@ -1,6 +1,6 @@
 import { Scene } from 'phaser';
 
-// No assets to preload yet — Phase 4 adds the vault-crack reveal art here.
+// No assets to preload yet — Runner.ts draws everything procedurally.
 export class Boot extends Scene {
   constructor() {
     super('Boot');

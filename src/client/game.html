@@ -2,69 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0"
+    />
     <link rel="stylesheet" href="game.css" />
-    <title>The Vault</title>
+    <title>The Vault — Getaway</title>
   </head>
 
   <body>
-    <div id="app">
-      <div id="game-container"></div>
-
-      <div id="ui-root">
-        <header id="vault-header">
-          <p id="vault-status">Loading vault...</p>
-        </header>
-
-        <section id="archive-section">
-          <h2>Past vaults</h2>
-          <p id="archive-empty" class="hint">No past vaults yet — check back tomorrow.</p>
-          <ul id="archive-strip"></ul>
-        </section>
-
-        <section id="guess-section">
-          <h2>Your guess</h2>
-          <p class="hint">5 unique digits, 0-9. You get exactly one real guess per vault.</p>
-          <form id="guess-form">
-            <input
-              id="guess-input"
-              type="text"
-              inputmode="numeric"
-              maxlength="5"
-              placeholder="e.g. 01234"
-              autocomplete="off"
-            />
-            <button id="guess-submit" type="submit">Submit guess</button>
-          </form>
-          <p id="guess-error" class="error" role="alert"></p>
-          <p id="guess-result"></p>
-        </section>
-
-        <section id="board-section">
-          <h2>Today's board</h2>
-          <p id="board-empty" class="hint">No guesses yet — be the first.</p>
-          <ul id="board-list"></ul>
-        </section>
-
-        <section id="scratchpad-section">
-          <h2>Scratch pad</h2>
-          <p class="hint">
-            Test a hypothesis against today's board. Free, unlimited, never submitted.
-          </p>
-          <input
-            id="scratch-input"
-            type="text"
-            inputmode="numeric"
-            maxlength="5"
-            placeholder="e.g. 56789"
-            autocomplete="off"
-          />
-          <p id="scratch-error" class="error" role="alert"></p>
-          <p id="scratch-summary"></p>
-          <ul id="scratch-list"></ul>
-        </section>
-      </div>
-    </div>
+    <div id="game-container"></div>
     <script type="module" src="game.ts"></script>
   </body>
 </html>
