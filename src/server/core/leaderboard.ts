@@ -62,6 +62,29 @@ export const removeMyScore = async (userId: string): Promise<void> => {
   await redis.hDel(namesKey(date), [userId]);
 };
 
+export type FakeLeaderboardEntry = { username: string; score: number };
+
+/** Fixed synthetic userIds (not a real Reddit userId shape), so re-running the dev seed just overwrites the same fake entries instead of piling up duplicates on every click. */
+const fakeUserId = (i: number): string => `dev-fake-${i}`;
+
+/**
+ * Dev-only: seeds today's leaderboard with several fake entries for testing
+ * display with realistic data volume (a full top-10, ties, long usernames,
+ * etc.) without needing that many real runs. No ghost replay is created for
+ * any of these — the ghost racer feature only reads a replay if one was
+ * actually saved (see ghost.ts), so a fake #1 here just has no ghost to
+ * play back, which is fine for pure leaderboard-display testing. Never
+ * touches any real player's own score.
+ */
+export const seedFakeLeaderboard = async (entries: FakeLeaderboardEntry[]): Promise<void> => {
+  const date = todayUTC();
+  await redis.zAdd(scoresKey(date), ...entries.map((entry, i) => ({ member: fakeUserId(i), score: entry.score })));
+  await redis.hSet(
+    namesKey(date),
+    Object.fromEntries(entries.map((entry, i) => [fakeUserId(i), entry.username]))
+  );
+};
+
 export const getLeaderboard = async (userId: string | undefined, limit: number): Promise<LeaderboardResult> => {
   const date = todayUTC();
   const sKey = scoresKey(date);

@@ -38,12 +38,20 @@ export const getDeathCounts = async (): Promise<Record<number, number>> => {
 };
 
 /**
- * Dev-only: sets (not increments) today's death count for one obstacle
- * index directly, so a marker can be made to appear without actually
- * dying there repeatedly. Idempotent by design — re-running always lands
- * on exactly `count`, rather than an increment-based tool that would keep
- * climbing higher on every click.
+ * Dev-only: sets (not increments) today's death counts for the given
+ * obstacle indices directly, so markers can be made to appear without
+ * actually dying there repeatedly. Idempotent by design — re-running always
+ * lands on exactly these counts, rather than an increment-based tool that
+ * would keep climbing higher on every click.
  */
+export const seedFakeDeathCounts = async (counts: Record<number, number>): Promise<void> => {
+  await redis.hSet(
+    deathsKey(todayUTC()),
+    Object.fromEntries(Object.entries(counts).map(([index, count]) => [index, String(count)]))
+  );
+};
+
+/** Single-index convenience wrapper around seedFakeDeathCounts, used by the "bump first obstacle" dev tool. */
 export const setDeathCountForTesting = async (obstacleIndex: number, count: number): Promise<void> => {
-  await redis.hSet(deathsKey(todayUTC()), { [String(obstacleIndex)]: String(count) });
+  await seedFakeDeathCounts({ [obstacleIndex]: count });
 };

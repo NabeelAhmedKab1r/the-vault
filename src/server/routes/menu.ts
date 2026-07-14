@@ -3,9 +3,9 @@ import type { UiResponse } from '@devvit/web/shared';
 import { context } from '@devvit/web/server';
 import { createPost } from '../core/post';
 import { addCoins } from '../core/player';
-import { removeMyScore } from '../core/leaderboard';
+import { removeMyScore, seedFakeLeaderboard, type FakeLeaderboardEntry } from '../core/leaderboard';
 import { clearMyGhostReplay } from '../core/ghost';
-import { setDeathCountForTesting } from '../core/deathMarkers';
+import { seedFakeDeathCounts, setDeathCountForTesting } from '../core/deathMarkers';
 import { DEATH_MARKER_THRESHOLD } from '../../shared/api';
 
 export const menu = new Hono();
@@ -124,5 +124,61 @@ menu.post('/dev-bump-death-marker', async (c) => {
   } catch (error) {
     console.error(`Error bumping dev death marker: ${error}`);
     return c.json<UiResponse>({ showToast: 'Failed to bump death marker' }, 400);
+  }
+});
+
+// Fills today's leaderboard with a full page of fake entries (fixed
+// synthetic userIds — see leaderboard.ts's fakeUserId — so re-running this
+// just overwrites the same fake rows instead of piling up more each click)
+// and scatters death counts across several obstacle indices, for testing
+// how the leaderboard/death-marker UI looks with realistic data volume.
+// No ghost replay is created for the fake #1 — see seedFakeLeaderboard's
+// doc comment for why that's fine for pure display testing. Never touches
+// the calling moderator's own real leaderboard entry.
+const FAKE_LEADERBOARD_ENTRIES: FakeLeaderboardEntry[] = [
+  { username: 'ShadowRunner', score: 612 },
+  { username: 'NightCrawler88', score: 540 },
+  { username: 'VaultGhost', score: 487 },
+  { username: 'SwiftFoxxo', score: 431 },
+  { username: 'PixelThief', score: 375 },
+  { username: 'GetawayKing', score: 298 },
+  { username: 'DashMaster_', score: 214 },
+  { username: 'QuickSilver99', score: 156 },
+  { username: 'BackAlleyBandit', score: 92 },
+  { username: 'RookieRunner', score: 34 },
+];
+
+// Index 1 is deliberately below DEATH_MARKER_THRESHOLD (3) so testing can
+// confirm low-death obstacles do NOT get a marker, not just that high-death
+// ones do.
+const FAKE_DEATH_COUNTS: Record<number, number> = {
+  0: 9,
+  1: 2,
+  2: 14,
+  3: 5,
+  5: 3,
+  7: 21,
+  10: 4,
+};
+
+menu.post('/dev-seed-fake-data', async (c) => {
+  if (!isDevSubreddit()) {
+    return c.json<UiResponse>(
+      { showToast: 'Fake data seeding is disabled outside the dev test subreddit.' },
+      403
+    );
+  }
+
+  try {
+    await Promise.all([seedFakeLeaderboard(FAKE_LEADERBOARD_ENTRIES), seedFakeDeathCounts(FAKE_DEATH_COUNTS)]);
+    return c.json<UiResponse>(
+      {
+        showToast: `Seeded ${FAKE_LEADERBOARD_ENTRIES.length} fake leaderboard entries and death markers at ${Object.keys(FAKE_DEATH_COUNTS).length} obstacles. Reload the post to see them.`,
+      },
+      200
+    );
+  } catch (error) {
+    console.error(`Error seeding fake test data: ${error}`);
+    return c.json<UiResponse>({ showToast: 'Failed to seed fake data' }, 400);
   }
 });

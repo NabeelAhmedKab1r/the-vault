@@ -52,6 +52,13 @@
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/dev-bump-death-marker"
+      },
+      {
+        "label": "[DEV ONLY] Seed fake leaderboard + death markers",
+        "description": "Fills today's leaderboard with 10 fake entries and scatters death counts across several obstacles, for testing UI display with realistic data volume. Only works on the dev test subreddit — remove before a real launch.",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/dev-seed-fake-data"
       }
     ]
   },
