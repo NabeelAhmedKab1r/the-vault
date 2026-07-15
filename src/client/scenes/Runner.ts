@@ -80,6 +80,26 @@ const GHOST_ALPHA = 0.4;
 /** Matches server/routes/api.ts's LEADERBOARD_LIMIT — how many pre-created row slots to build. */
 const LEADERBOARD_LIMIT = 10;
 
+// Extra scene-position clearance for the top HUD row. Kept as a modest
+// safety margin (see EMOJI_GLYPH_TOP_PADDING below for the actual fix to the
+// coin-icon clipping bug — this constant alone does NOT fix it, since that
+// clipping happens inside each Text object's own offscreen canvas before it
+// is ever positioned in the scene).
+const HUD_TOP_PADDING = 28;
+const HUD_ROW2_Y = HUD_TOP_PADDING + 28;
+const HUD_ROW3_Y = HUD_TOP_PADDING + 54;
+
+// Phaser's Text GameObject renders to its own offscreen canvas sized purely
+// from `fontSize` (see GetTextSize.js: `lineHeight = size.fontSize +
+// strokeThickness`) — it does not measure actual glyph ink. Color emoji
+// glyphs commonly draw taller than their nominal font size, so at a 16px
+// coinText the 🪙 glyph's top pixels get clipped by the top edge of that
+// 16px-tall internal canvas, regardless of where the Text object is placed
+// in the scene afterward. `padding.top` grows the internal canvas and
+// shifts drawing down inside it, which is Phaser's documented fix for this
+// exact class of bug (see Text.js's `setPadding`/`padding` handling).
+const EMOJI_GLYPH_TOP_PADDING = 10;
+
 /**
  * "The Vault: Getaway" runner scene, through the post-Stage-4 shop pass:
  *  - Stage 1: core tap-to-jump loop (confirmed fun before anything else got built).
@@ -337,7 +357,7 @@ export class Runner extends Scene {
     this.landEmitter.setDepth(2);
 
     this.scoreText = this.add
-      .text(16, 16, '0', {
+      .text(16, HUD_TOP_PADDING, '0', {
         fontFamily: 'Arial Black',
         fontSize: '20px',
         color: THEME_TEXT_COLORS.gold,
@@ -345,7 +365,7 @@ export class Runner extends Scene {
       .setDepth(100);
 
     this.questText = this.add
-      .text(16, 44, '', {
+      .text(16, HUD_ROW2_Y, '', {
         fontFamily: 'Arial',
         fontSize: '13px',
         color: THEME_TEXT_COLORS.textMuted,
@@ -385,28 +405,31 @@ export class Runner extends Scene {
     this.questEmitter.setDepth(101);
 
     this.coinText = this.add
-      .text(0, 16, '🪙 0', {
+      .text(0, HUD_TOP_PADDING, '🪙 0', {
         fontFamily: 'Arial Black',
         fontSize: '16px',
         color: THEME_TEXT_COLORS.gold,
+        padding: { top: EMOJI_GLYPH_TOP_PADDING },
       })
       .setOrigin(1, 0)
       .setDepth(100);
 
     this.shopButtonText = this.add
-      .text(0, 44, '🎨 SKINS', {
+      .text(0, HUD_ROW2_Y, '🎨 SKINS', {
         fontFamily: 'Arial Black',
         fontSize: '13px',
         color: THEME_TEXT_COLORS.textMuted,
+        padding: { top: EMOJI_GLYPH_TOP_PADDING },
       })
       .setOrigin(1, 0)
       .setDepth(100);
 
     this.leaderboardButtonText = this.add
-      .text(16, 70, '🏆 RANKS', {
+      .text(16, HUD_ROW3_Y, '🏆 RANKS', {
         fontFamily: 'Arial Black',
         fontSize: '13px',
         color: THEME_TEXT_COLORS.textMuted,
+        padding: { top: EMOJI_GLYPH_TOP_PADDING },
       })
       .setOrigin(0, 0)
       .setDepth(100);
@@ -464,7 +487,7 @@ export class Runner extends Scene {
       skin,
       bg: this.add.graphics().setDepth(201).setVisible(false),
       icon: this.add.image(0, 0, this.skinTextures.get(skin.id)!.run[1]!).setDepth(202).setVisible(false),
-      lockIcon: this.add.text(0, 0, '🔒', { fontSize: '14px' }).setOrigin(0.5).setDepth(203).setVisible(false),
+      lockIcon: this.add.text(0, 0, '🔒', { fontSize: '14px', padding: { top: EMOJI_GLYPH_TOP_PADDING, bottom: EMOJI_GLYPH_TOP_PADDING } }).setOrigin(0.5).setDepth(203).setVisible(false),
       label: this.add
         .text(0, 0, '', { fontFamily: 'Arial', fontSize: '11px', color: THEME_TEXT_COLORS.textMuted, align: 'center' })
         .setOrigin(0.5)
@@ -480,7 +503,7 @@ export class Runner extends Scene {
         .image(0, 0, ensureSceneryPreviewTexture(this, scenery.id, scenery.palette))
         .setDepth(202)
         .setVisible(false),
-      lockIcon: this.add.text(0, 0, '🔒', { fontSize: '14px' }).setOrigin(0.5).setDepth(203).setVisible(false),
+      lockIcon: this.add.text(0, 0, '🔒', { fontSize: '14px', padding: { top: EMOJI_GLYPH_TOP_PADDING, bottom: EMOJI_GLYPH_TOP_PADDING } }).setOrigin(0.5).setDepth(203).setVisible(false),
       label: this.add
         .text(0, 0, '', { fontFamily: 'Arial', fontSize: '11px', color: THEME_TEXT_COLORS.textMuted, align: 'center' })
         .setOrigin(0.5)
@@ -601,8 +624,8 @@ export class Runner extends Scene {
     this.promptText.setPosition(width / 2, height * 0.4).setWordWrapWidth(Math.min(width * 0.8, 380));
     this.questCelebrationText.setPosition(width / 2, height * 0.25).setWordWrapWidth(Math.min(width * 0.8, 380));
 
-    this.coinText.setPosition(width - 16, 16);
-    this.shopButtonText.setPosition(width - 16, 44);
+    this.coinText.setPosition(width - 16, HUD_TOP_PADDING);
+    this.shopButtonText.setPosition(width - 16, HUD_ROW2_Y);
     const pad = 8;
     this.shopButtonRect = {
       x: this.shopButtonText.x - this.shopButtonText.width - pad,
@@ -611,7 +634,7 @@ export class Runner extends Scene {
       h: this.shopButtonText.height + pad * 2,
     };
 
-    this.leaderboardButtonText.setPosition(16, 70);
+    this.leaderboardButtonText.setPosition(16, HUD_ROW3_Y);
     this.leaderboardButtonRect = {
       x: this.leaderboardButtonText.x - pad,
       y: this.leaderboardButtonText.y - pad,
